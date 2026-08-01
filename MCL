@@ -1,6 +1,34 @@
 # =====================================================
-# ROBLOX CHEAT SCANNER v4.6.1
+# ROBLOX CHEAT SCANNER v4.7
 # PROPERTY OF JD
+#
+# v4.7
+#   RESTORED (dropped in the v4.5 rewrite, absent for four builds):
+#   * Renamed-binary scan. Reads cheat strings from inside a PE's first 64KB
+#     instead of trusting its filename. v4.5 kept the helper and never called
+#     it, so solara.exe renamed to svchost.exe defeated every check at once.
+#   * All-time prefetch pass. The main pass honours the selected time range, so
+#     a participant accepting the 2-day default hid anything older. This pass
+#     ignores the range.
+#   * Recent files (.lnk) -- presence class.
+#   * Generic-named unsigned executables in temp -- now needs elevated entropy
+#     AND no valid signature, and caps at REVIEW.
+#
+#   NEW:
+#   * Recycle Bin $I records: original path + deletion time of deleted files.
+#     Nothing evicts these automatically, unlike prefetch.
+#   * Browser download history (Chrome/Edge/Brave/Opera/Firefox). Survives the
+#     file being deleted, which Zone.Identifier does not. Raw string scan, not
+#     a SQLite parse -- flagged REVIEW, never Critical, and the report says so.
+#
+#   FIXED:
+#   * Bulk-deletion false positive introduced in v4.6. Any large removal was
+#     CRITICAL, so Storage Sense trimming 86 of the OLDEST prefetch entries --
+#     including Defender's own binaries -- read as anti-forensic cleanup.
+#     Removals are now profiled: if the deleted set is full of Windows
+#     servicing binaries it is CONTEXT; selective removal stays CRITICAL.
+#   * Renamed $profile to $delProfile in the delta comparison; $profile is a
+#     PowerShell automatic variable.
 #
 # v4.6.1
 #   * GUI: every tab now has a detail pane. Clicking a row shows all columns in
@@ -735,6 +763,7 @@ foreach ($s in @(
     "Process Memory","Named Pipes","Process Handles",
     "Kernel Drivers","Launch Chain","Roblox Logs",
     "Download Provenance","Crash Artifacts","Hash Blocklist",
+    "Renamed Binaries","Deleted Files","Browser Downloads",
     "Entropy","Snapshot Delta"
 )) { Register-Section $s }
 
@@ -1238,7 +1267,7 @@ function Write-Banner {
     Clear-Host
     Write-Host ""
     Write-Host "  +=================================================+" -ForegroundColor Cyan
-    Write-Host "  |   ROBLOX CHEAT SCANNER v4.6.1                  |" -ForegroundColor Cyan
+    Write-Host "  |   ROBLOX CHEAT SCANNER v4.7                    |" -ForegroundColor Cyan
     Write-Host "  |   PROPERTY OF JD                               |" -ForegroundColor DarkGray
     Write-Host "  +=================================================+" -ForegroundColor Cyan
     Write-Host ""
@@ -1544,18 +1573,27 @@ function Compare-Snapshots($previous, $current) {
             $delPct = [math]::Round(($deleted.Count / $prevSet.Count) * 100, 1)
             $wiped  = ($currSet.Count -eq 0 -and $prevSet.Count -gt 20)
             $bulk   = ($deleted.Count -ge 15) -or ($delPct -ge 10 -and $deleted.Count -ge 5)
+            $delProfile = Test-MaintenanceDeletion $deleted
             if ($wiped) {
                 Write-Critical "$label WAS EMPTIED: $($prevSet.Count) entries -> 0. This does not happen on its own."
                 Add-Finding -Section "Snapshot Delta" -Type "$category-Wiped" `
                     -Detail "$label went from $($prevSet.Count) entries to 0" -Severity "Critical" -Tier "A" `
                     -Evidence "total removal of an artifact store between scans"
                 Add-Timeline "CRITICAL: $label emptied between scans"
+            } elseif ($bulk -and $delProfile.LooksLikeOS) {
+                # Windows trimmed its own caches. Recorded, never escalated.
+                Write-Ctx "$label bulk removal: $($deleted.Count) of $($prevSet.Count) ($delPct%) -- $($delProfile.OsCount) are Windows servicing binaries ($($delProfile.OsPercent)%)"
+                Write-Ctx "  Consistent with Storage Sense / Disk Cleanup / cache trimming, NOT targeted cleanup."
+                Add-Finding -Section "Snapshot Delta" -Type "$category-MaintenanceTrim" `
+                    -Detail "$($deleted.Count) of $($prevSet.Count) $label entries removed ($delPct%)" -Severity "Context" `
+                    -Evidence "$($delProfile.OsCount) removed entries are Windows servicing binaries (Defender, NGen, defrag, etc). A cleaner has no reason to delete these; the OS trims oldest-first."
             } elseif ($bulk) {
                 Write-Critical "$label BULK REMOVAL: $($deleted.Count) of $($prevSet.Count) entries gone ($delPct%)"
+                Write-Critical "  Only $($delProfile.OsCount) are Windows servicing binaries -- this removal was SELECTIVE."
                 Add-Finding -Section "Snapshot Delta" -Type "$category-BulkDeleted" `
                     -Detail "$($deleted.Count) of $($prevSet.Count) $label entries removed ($delPct%)" -Severity "Critical" -Tier "A" `
-                    -Evidence "routine cache eviction does not remove this proportion between two scans minutes apart"
-                Add-Timeline "CRITICAL: $label bulk removal ($($deleted.Count) entries)"
+                    -Evidence "selective removal: only $($delProfile.OsCount)/$($deleted.Count) were OS servicing binaries, so this is not routine cache trimming"
+                Add-Timeline "CRITICAL: $label selective bulk removal ($($deleted.Count) entries)"
             }
         }
 
@@ -1595,6 +1633,43 @@ function Compare-Snapshots($previous, $current) {
     Write-Host ""
     Write-Host "  Delta rows recorded: $($deltaFindings.Count) (scored: $($script:Sections['Snapshot Delta'].Critical + $script:Sections['Snapshot Delta'].Review))" -ForegroundColor DarkGray
     Write-SectionResult "Snapshot Delta"
+}
+
+# Names Windows itself runs for servicing/maintenance. A removal set full of
+# these is the OS trimming its caches, not somebody cleaning up after a cheat.
+$osMaintenanceNames = @(
+    "msmpeng","mrt","am_delta","am_base","mpsigstub","mpcmdrun","nissrv",
+    "ngen","ngentask","winsat","defrag","cleanmgr","dism","sfc",
+    "tiworker","trustedinstaller","sppsvc","sppextcomobj","slui",
+    "wuauclt","usoclient","mousocoreworker","sihclient","waasmedic",
+    "compattelrunner","devicecensus","dusmsvc","disksnapshot",
+    "searchprotocolhost","searchfilterhost","searchindexer",
+    "backgroundtaskhost","systemsettings","runtimebroker",
+    "wermgr","werfault","dllhost","wmiprvse","taskhostw","conhost",
+    "smartscreen","securityhealthservice","securityhealthsystray",
+    "consent","lockapp","shellexperiencehost","startmenuexperiencehost",
+    "audiodg","spoolsv","fontdrvhost","ctfmon","sihost","dwm"
+)
+
+function Test-MaintenanceDeletion($deletedList) {
+    # Returns a profile object describing WHY entries disappeared, so the
+    # caller can distinguish anti-forensic cleanup from routine trimming.
+    $osHits = 0
+    foreach ($e in $deletedList) {
+        if (-not $e) { continue }
+        $leaf = try { [IO.Path]::GetFileNameWithoutExtension(([string]$e).ToLower()) } catch { ([string]$e).ToLower() }
+        $leaf = $leaf -replace '-[0-9a-f]{8}$',''
+        foreach ($os in $osMaintenanceNames) {
+            if ($leaf -eq $os -or $leaf -like "$os*") { $osHits++; break }
+        }
+    }
+    $total = [Math]::Max($deletedList.Count, 1)
+    $osPct = [math]::Round(($osHits / $total) * 100, 1)
+    return [PSCustomObject]@{
+        OsCount      = $osHits
+        OsPercent    = $osPct
+        LooksLikeOS  = ($osHits -ge 3 -or $osPct -ge 25)
+    }
 }
 
 # =====================================================
@@ -2310,6 +2385,35 @@ function Run-Section6 {
         }
     }
     if ($n -eq 0) { Write-OK "Entropy: nothing above threshold among unsigned binaries" }
+
+    # ---- RESTORED from v4.4: blandly-named executables in Temp. "update.exe"
+    # ---- and "loader.exe" in a temp folder are what a dropper names itself.
+    # ---- v4.4 scored these outright; here they need elevated entropy AND no
+    # ---- valid signature, and they cap at Review.
+    Write-Info "Generic-named executables in temp locations..."
+    $genericNames = @("update","updater","service","helper","loader","launcher",
+                      "runner","install","installer","setup","patch","main","client","host")
+    $g = 0
+    foreach ($loc in @("$env:TEMP","$env:LOCALAPPDATA\Temp","$env:APPDATA")) {
+        if (-not (Test-Path $loc)) { continue }
+        foreach ($exe in @(Get-ChildItem $loc -Filter "*.exe" -File -Force -ErrorAction SilentlyContinue |
+                           Where-Object { $script:ScanDaysBack -ge 9999 -or $_.LastWriteTime -ge $script:ScanCutoff })) {
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($exe.Name).ToLower()
+            if ($genericNames -notcontains $baseName) { continue }
+            if (Is-GlobalFP $exe.FullName) { Add-FP "GenericExe" $exe.FullName "global FP list"; continue }
+            $sig = Get-SigInfo $exe.FullName
+            if ($sig.Status -eq "Valid") { Add-FP "GenericExe" $exe.FullName "validly signed: $($sig.Subject)"; continue }
+            $ent = Get-FileEntropy $exe.FullName
+            if ($ent -lt $entropyWarn) { continue }
+            Write-Amber "Generic-named unsigned exe in temp (entropy $ent): $($exe.FullName)"
+            Add-Finding -Section "Entropy" -Type "GenericExe" -Detail $exe.FullName `
+                -Value "entropy:$ent" -Severity "Review" `
+                -Evidence "blandly-named, unsigned, elevated entropy, in a temp path -- also matches many legitimate installers"
+            $entropyResults.Add([PSCustomObject]@{ Path=$exe.FullName; Entropy=$ent; Flag="GENERIC"; Sig=$sig.Status })
+            $g++
+        }
+    }
+    if ($g -eq 0) { Write-OK "No generic-named unsigned executables in temp" }
 
     Write-SectionResult "PowerShell History"
     Write-SectionResult "Entropy"
@@ -3469,6 +3573,313 @@ function Run-HashBlocklistScan {
 }
 
 # =====================================================
+# RENAMED BINARY SCAN  (RESTORED -- was in v4.4, dropped in v4.5)
+#
+# Renaming is the cheapest evasion there is: solara.exe -> svchost.exe defeats
+# every name-based check in this tool at once. This reads the binary's own
+# header/string table instead of its filename. v4.5 kept the helper function
+# and never called it, so this capability was silently absent for four builds.
+#
+# Improved over v4.4:
+#   * streams 64KB instead of ReadAllBytes (v4.4 could OOM on a large file)
+#   * Tier-aware -- a Tier B term inside a binary is REVIEW, not CRITICAL
+#   * skips Microsoft/Roblox-signed binaries outright
+#   * reports the signer, so "renamed" vs "legitimately named" is visible
+# =====================================================
+function Run-RenamedBinaryScan {
+    Write-Header "RENAMED BINARY SCAN (PE content)"
+    Mark-Ran "Renamed Binaries"
+    $paths = @("$env:TEMP","$env:LOCALAPPDATA\Temp","$env:APPDATA","$env:LOCALAPPDATA",
+               "$env:USERPROFILE\Downloads","$env:USERPROFILE\Desktop")
+    $checked = 0; $n = 0
+    foreach ($sp in $paths) {
+        if (-not (Test-Path $sp)) { continue }
+        foreach ($exe in @(Get-ChildItem $sp -File -Force -ErrorAction SilentlyContinue |
+                           Where-Object { $_.Extension -match '^\.(exe|dll|scr)$' } |
+                           Where-Object { $script:ScanDaysBack -ge 9999 -or $_.LastWriteTime -ge $script:ScanCutoff })) {
+            if (Is-GlobalFP $exe.FullName) { Add-FP "RenamedPE" $exe.FullName "global FP list"; continue }
+
+            $sig = Get-SigInfo $exe.FullName
+            $trusted = $false
+            if ($sig.Status -eq "Valid") {
+                foreach ($t in @("Microsoft Corporation","Microsoft Windows","Roblox Corporation")) {
+                    if ($sig.Subject -like "*$t*") { $trusted = $true; break }
+                }
+            }
+            if ($trusted) { Add-FP "RenamedPE" $exe.FullName "validly signed by $($sig.Subject)"; continue }
+
+            $checked++
+            $content = Get-PEHeaderString $exe.FullName 65536
+            if (-not $content) { continue }
+            $lower = $content.ToLower()
+
+            $hitTerm = $null; $hitTier = $null
+            foreach ($t in $cheatTerms) {
+                if ($t.Tier -eq "C") { continue }          # fragments produce garbage inside binaries
+                if ($t.T.Length -lt 5) { continue }        # too short to be meaningful in a byte blob
+                if ($lower.Contains($t.T.ToLower())) { $hitTerm = $t.T; $hitTier = $t.Tier; if ($t.Tier -eq "A") { break } }
+            }
+            if (-not $hitTerm) {
+                foreach ($d in $suspiciousDomains) {
+                    if ($lower.Contains($d.ToLower())) { $hitTerm = $d; $hitTier = "A"; break }
+                }
+            }
+            if (-not $hitTerm) { continue }
+
+            # If the filename ALSO matches, it is not renamed -- other sections
+            # already have it. The interesting case is content != name.
+            $nameMatch = Test-CheatMatch $exe.Name
+            $renamed   = ($null -eq $nameMatch)
+            $sev = if ($hitTier -eq "A") { if ($renamed) { "Critical" } else { "Review" } } else { "Review" }
+            $label = if ($renamed) { "RENAMED" } else { "name already matches" }
+            $txt = "$label binary: $($exe.FullName) contains '$hitTerm' [Tier $hitTier]"
+            if ($sev -eq "Critical") { Write-Hit $txt } else { Write-Amber $txt }
+            Add-Finding -Section "Renamed Binaries" -Type $(if ($renamed) { "RenamedPE" } else { "PEContentMatch" }) `
+                -Detail $exe.FullName -Value $hitTerm -Severity $sev -Tier $hitTier `
+                -Evidence "string found inside the first 64KB of the binary; signature: $($sig.Status) $($sig.Subject)"
+            if ($renamed) { Add-Timeline "Renamed cheat binary: $($exe.FullName) contains '$hitTerm'" }
+            $n++
+        }
+    }
+    $script:Sections["Renamed Binaries"].Coverage = "$checked unsigned/untrusted binaries inspected"
+    if ($n -eq 0) { Write-OK "No cheat strings inside untrusted binaries ($checked inspected)" }
+    Write-SectionResult "Renamed Binaries"
+}
+
+# =====================================================
+# PAN SCAN -- PREFETCH, ALL NAMES, ALL TIME  (RESTORED from v4.4)
+#
+# The main prefetch pass honours the selected time range. That means a
+# participant who accepts the 2-day default hides anything that ran last week.
+# This pass ignores the range entirely and checks every .pf file for cheat
+# names. It exists precisely because the default answer is the wrong one.
+# =====================================================
+function Run-PANScan {
+    Write-Header "PREFETCH -- ALL NAMES, ALL TIME"
+    $pfPath = "C:\Windows\Prefetch"
+    if (-not (Test-Path $pfPath)) {
+        Write-Skip "Prefetch directory not present -- all-time pass NOT PERFORMED"
+        Write-Host ""
+        return
+    }
+    $pfFiles = @(Get-ChildItem $pfPath -Filter "*.pf" -File -Force -ErrorAction SilentlyContinue)
+    Write-Info "Checking all $($pfFiles.Count) prefetch files regardless of the selected time range"
+    $n = 0
+    $alreadySeen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($r in $prefetchViewerData) { if ($r.Exe) { [void]$alreadySeen.Add([string]$r.Exe) } }
+
+    foreach ($pf in $pfFiles) {
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($pf.Name)
+        $exe  = if ($base -match '^(.+)-[0-9A-F]{8}$') { $Matches[1] } else { $base }
+        if ($alreadySeen.Contains($exe)) { continue }     # in range already, reported above
+        if (Is-GlobalFP $exe) { Add-FP "PAN" $exe "global FP list"; continue }
+        $m = Test-CheatMatch $exe
+        if (-not $m) { continue }
+        $info    = Get-PrefetchInfo $pf.FullName
+        $lastRun = if ($info.Times.Count -gt 0) { $info.Times[0].ToString("yyyy-MM-dd HH:mm:ss") } else { $pf.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") }
+        $sev = Get-SeverityForMatch $m "Critical"
+        $txt = "OUTSIDE selected range -- $exe ran $lastRun ($($info.RunCount)x) -- '$($m.Term)' [Tier $($m.Tier)]"
+        if ($sev -eq "Critical") { Write-Hit $txt } elseif ($sev -eq "Review") { Write-Amber $txt } else { Write-Ctx $txt }
+        Add-Finding -Section "Execution Artifacts" -Type "Prefetch-AllTime" -Detail $exe `
+            -Value $m.Term -Severity $sev -Tier $m.Tier `
+            -Evidence "last run $lastRun, run count $($info.RunCount) -- found only because this pass ignores the time range"
+        Add-Timeline "Prefetch (all-time): $exe ran $lastRun"
+        $prefetchViewerData.Add([PSCustomObject]@{
+            FileName=$pf.Name; Exe=$exe; SizeKB=[math]::Round($pf.Length/1KB,2)
+            LastRun=$lastRun; AllRunTimes=$lastRun; RunCount=$info.RunCount
+            Parsed=$info.Parsed; Match=$m.Term; Tier=$m.Tier; MatchType=$m.Match
+        }) | Out-Null
+        $n++
+    }
+    if ($n -eq 0) { Write-OK "No additional cheat names in prefetch outside the selected range" }
+    Write-Host ""
+}
+
+# =====================================================
+# RECENT FILES (.lnk shortcuts)  (RESTORED from v4.4)
+# Explorer writes a shortcut here when a file is opened. Presence-class:
+# it shows a file was accessed, not that it executed.
+# =====================================================
+function Run-RecentFilesScan {
+    Write-Header "RECENT FILES (shortcuts)"
+    $recentPath = "$env:APPDATA\Microsoft\Windows\Recent"
+    if (-not (Test-Path $recentPath)) {
+        Write-Skip "Recent folder not present"
+        Write-Host ""
+        return
+    }
+    $items = @(Get-ChildItem $recentPath -File -Force -ErrorAction SilentlyContinue |
+               Where-Object { $script:ScanDaysBack -ge 9999 -or $_.LastWriteTime -ge $script:ScanCutoff })
+    Write-Info "Recent items in range: $($items.Count)"
+    $n = 0
+    foreach ($item in $items) {
+        if (Is-GlobalFP $item.FullName) { Add-FP "RecentFile" $item.Name "global FP list"; continue }
+        $m = Test-CheatMatch $item.Name
+        if (-not $m) { continue }
+        $sev = Get-SeverityForMatch $m "Review"     # presence, never critical alone
+        $txt = "Recent: $($item.Name) -- '$($m.Term)' [Tier $($m.Tier)]"
+        if ($sev -eq "Review") { Write-Amber $txt } else { Write-Ctx $txt }
+        Add-Finding -Section "Presence Artifacts" -Type "RecentFile" -Detail $item.Name `
+            -Value $m.Term -Severity $sev -Tier $m.Tier `
+            -Evidence "shortcut written $($item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')); shows the file was OPENED, not that it ran"
+        $n++
+    }
+    if ($n -eq 0) { Write-OK "Recent files: nothing" }
+    Write-Host ""
+}
+
+# =====================================================
+# RECYCLE BIN  (NEW)
+# $I records preserve the ORIGINAL path and the deletion time of every file
+# still in the bin. Someone who deleted a cheat rather than shredding it leaves
+# the whole story here -- and unlike prefetch, nothing evicts it automatically.
+# =====================================================
+function Get-RecycleBinRecords {
+    $out = [System.Collections.Generic.List[object]]::new()
+    foreach ($drive in @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+                         Where-Object { $_.Root -match '^[A-Za-z]:\\$' })) {
+        $binRoot = Join-Path $drive.Root '$Recycle.Bin'
+        if (-not (Test-Path $binRoot)) { continue }
+        foreach ($sidDir in @(Get-ChildItem $binRoot -Directory -Force -ErrorAction SilentlyContinue)) {
+            foreach ($f in @(Get-ChildItem $sidDir.FullName -Filter '$I*' -File -Force -ErrorAction SilentlyContinue)) {
+                try {
+                    $b = [System.IO.File]::ReadAllBytes($f.FullName)
+                    if ($b.Length -lt 24) { continue }
+                    $ver = [System.BitConverter]::ToInt64($b, 0)
+                    $size = [System.BitConverter]::ToInt64($b, 8)
+                    $ft   = [System.BitConverter]::ToInt64($b, 16)
+                    $when = $null
+                    if ($ft -gt 0 -and $ft -lt 999999999999999999L) {
+                        try { $when = [DateTime]::FromFileTimeUtc($ft).ToLocalTime() } catch {}
+                    }
+                    $path = ""
+                    if ($ver -eq 2) {
+                        if ($b.Length -lt 28) { continue }
+                        $len = [System.BitConverter]::ToInt32($b, 24)
+                        if ($len -gt 0 -and (28 + $len * 2) -le $b.Length) {
+                            $path = [System.Text.Encoding]::Unicode.GetString($b, 28, $len * 2).TrimEnd([char]0)
+                        }
+                    } else {
+                        if ($b.Length -ge 24 + 520) {
+                            $path = [System.Text.Encoding]::Unicode.GetString($b, 24, 520).TrimEnd([char]0)
+                        }
+                    }
+                    if (-not $path) { continue }
+                    $out.Add([PSCustomObject]@{ OriginalPath=$path; SizeBytes=$size; Deleted=$when; Record=$f.FullName }) | Out-Null
+                } catch { continue }
+            }
+        }
+    }
+    return $out
+}
+
+function Run-RecycleBinScan {
+    Write-Header "RECYCLE BIN (deleted file records)"
+    $recs = Get-RecycleBinRecords
+    if ($recs.Count -eq 0) {
+        Write-Skip "No readable Recycle Bin records -- NOT CHECKED"
+        Mark-Skipped "Deleted Files" 'no readable index records found (bin empty or access denied)'
+        Write-SectionResult "Deleted Files"
+        return
+    }
+    Mark-Ran "Deleted Files" "$($recs.Count) deleted-file record(s) read"
+    Write-Info "Records: $($recs.Count)"
+    $n = 0
+    foreach ($r in $recs) {
+        if ($script:ScanDaysBack -lt 9999 -and $r.Deleted -and $r.Deleted -lt $script:ScanCutoff) { continue }
+        if (Is-GlobalFP $r.OriginalPath) { Add-FP "RecycleBin" $r.OriginalPath "global FP list"; continue }
+        $m = Test-CheatMatch $r.OriginalPath
+        if (-not $m) { continue }
+        $sev = Get-SeverityForMatch $m "Critical"
+        $when = if ($r.Deleted) { $r.Deleted.ToString("yyyy-MM-dd HH:mm:ss") } else { "unknown" }
+        $txt = "Deleted: $($r.OriginalPath) at $when -- '$($m.Term)' [Tier $($m.Tier)]"
+        if ($sev -eq "Critical") { Write-Hit $txt } elseif ($sev -eq "Review") { Write-Amber $txt } else { Write-Ctx $txt }
+        Add-Finding -Section "Deleted Files" -Type "RecycleBinCheatFile" -Detail $r.OriginalPath `
+            -Value $m.Term -Severity $sev -Tier $m.Tier `
+            -Evidence "deleted $when, $([math]::Round($r.SizeBytes/1KB,1))KB; the file itself may still be recoverable from the bin"
+        Add-Timeline "Recycle Bin: $($r.OriginalPath) deleted $when"
+        $n++
+    }
+    if ($n -eq 0) { Write-OK "Recycle Bin: no cheat-named deleted files" }
+    Write-SectionResult "Deleted Files"
+}
+
+# =====================================================
+# BROWSER DOWNLOAD HISTORY  (NEW)
+#
+# Zone.Identifier only survives while the file does. Browser history records
+# the download even after the file is deleted -- so this catches what
+# provenance cannot.
+#
+# HONEST LIMIT: this is a raw string scan of the history database, not a
+# SQLite parse (PowerShell 5.1 has no SQLite provider). It reliably finds URLs
+# that are present, but it cannot tell you the download's status, whether it
+# completed, or reconstruct the row. Treat a hit as "this URL appears in the
+# browser's history store", which is why nothing here is Critical on its own.
+# =====================================================
+function Run-BrowserDownloadScan {
+    Write-Header "BROWSER DOWNLOAD HISTORY"
+    $dbs = [System.Collections.Generic.List[object]]::new()
+    foreach ($prof in $allUserProfiles) {
+        foreach ($rel in @(
+            "AppData\Local\Google\Chrome\User Data\Default\History",
+            "AppData\Local\Microsoft\Edge\User Data\Default\History",
+            "AppData\Local\BraveSoftware\Brave-Browser\User Data\Default\History",
+            "AppData\Roaming\Opera Software\Opera Stable\History"
+        )) {
+            $f = Join-Path $prof $rel
+            if (Test-Path $f) { $dbs.Add([PSCustomObject]@{ Path=$f; Browser=($rel -split '\\')[2] }) | Out-Null }
+        }
+        $ffRoot = Join-Path $prof "AppData\Roaming\Mozilla\Firefox\Profiles"
+        if (Test-Path $ffRoot) {
+            foreach ($d in @(Get-ChildItem $ffRoot -Directory -ErrorAction SilentlyContinue)) {
+                $f = Join-Path $d.FullName "places.sqlite"
+                if (Test-Path $f) { $dbs.Add([PSCustomObject]@{ Path=$f; Browser="Firefox" }) | Out-Null }
+            }
+        }
+    }
+    if ($dbs.Count -eq 0) {
+        Write-Skip "No browser history stores found -- NOT CHECKED"
+        Mark-Skipped "Browser Downloads" "no Chrome/Edge/Brave/Opera/Firefox history store located"
+        Write-SectionResult "Browser Downloads"
+        return
+    }
+
+    $read = 0; $n = 0
+    foreach ($db in $dbs) {
+        $tmp = Join-Path $env:TEMP ("hist_" + [Guid]::NewGuid().ToString("N") + ".tmp")
+        try {
+            # the live DB is locked while the browser runs; copy first
+            Copy-Item $db.Path $tmp -Force -ErrorAction Stop
+            $bytes = [System.IO.File]::ReadAllBytes($tmp)
+            $text  = [System.Text.Encoding]::ASCII.GetString($bytes).ToLower()
+            $read++
+            foreach ($d in $suspiciousDomains) {
+                if (-not $text.Contains($d.ToLower())) { continue }
+                Write-Amber "$($db.Browser) history references $d"
+                Add-Finding -Section "Browser Downloads" -Type "BrowserHistoryDomain" `
+                    -Detail "$($db.Browser): $d" -Value $d -Severity "Review" -Tier "A" `
+                    -Evidence "raw string match in the history store -- confirms the URL is recorded, not that a download completed. Verify in the browser's own history UI."
+                Add-Timeline "Browser history references $d"
+                $n++
+            }
+        } catch {
+            Write-Ctx "Could not read $($db.Browser) history (locked or denied): $($db.Path)"
+        } finally {
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($read -eq 0) {
+        Mark-Skipped "Browser Downloads" "all history stores were locked or unreadable"
+        Write-Warn "No history store could be read -- this is NOT a clean result"
+    } else {
+        Mark-Ran "Browser Downloads" "$read of $($dbs.Count) history store(s) read"
+        if ($n -eq 0) { Write-OK "No cheat-host references in browser history ($read store(s) read)" }
+    }
+    Write-SectionResult "Browser Downloads"
+}
+
+# =====================================================
 # SUMMARY -- replaces the numeric scores entirely
 #
 # v4.4 averaged 15 category scores. That meant one confirmed BYOVD driver
@@ -3605,7 +4016,7 @@ function Generate-Report($verdict, $scannerHash) {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Roblox Cheat Scanner v4.6.1 -- $env:COMPUTERNAME</title>
+<title>Roblox Cheat Scanner v4.7 -- $env:COMPUTERNAME</title>
 <style>
   :root{--bg:#0a0a0f;--bg3:#161b27;--accent:#00d4ff;--red:#ff3d3d;--amber:#ffd700;--green:#00ff88;--grey:#7a8190;--text:#e8e8e8;--muted:#666;--border:#1e2435}
   *{box-sizing:border-box;margin:0;padding:0}
@@ -3639,7 +4050,7 @@ function Generate-Report($verdict, $scannerHash) {
 </style>
 </head>
 <body>
-<h1>ROBLOX CHEAT SCANNER v4.6.1 -- PROPERTY OF JD</h1>
+<h1>ROBLOX CHEAT SCANNER v4.7 -- PROPERTY OF JD</h1>
 
 <div class="verdict $verdictClass">
   <div class="big">$(HtmlEnc $verdict.Line)</div>
@@ -3711,7 +4122,7 @@ function Generate-Report($verdict, $scannerHash) {
 </details>
 
 <footer>
-Roblox Cheat Scanner v4.6.1 | $(HtmlEnc $env:COMPUTERNAME) | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') local / $($startTimeUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC<br>
+Roblox Cheat Scanner v4.7 | $(HtmlEnc $env:COMPUTERNAME) | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') local / $($startTimeUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC<br>
 This report is plain HTML and is NOT tamper-evident. It can be edited by anyone
 with access to the machine. Verify the report hash out of band before relying
 on it in any decision.<br>
@@ -4050,6 +4461,11 @@ Run-KernelDriverScan
 Run-LaunchChainScan
 Scan-RobloxLogs
 Run-ProvenanceScan
+Run-RenamedBinaryScan
+Run-PANScan
+Run-RecentFilesScan
+Run-RecycleBinScan
+Run-BrowserDownloadScan
 Run-CrashArtifactScan
 Run-HashBlocklistScan
 Run-AmCacheScan
