@@ -1,6 +1,72 @@
 # =====================================================
-# ROBLOX CHEAT SCANNER v4.7
+# ROBLOX CHEAT SCANNER v5.0
 # PROPERTY OF JD
+#
+# v5.0
+#   FIXED (real bug, visible in the v4.9 run as "BAM (0)"):
+#     foreach ($x in (try {...} catch {...})) -- try/catch is a STATEMENT in
+#     PowerShell 5.1, not an expression. In an enumerable position it yields
+#     nothing, so the BAM loop never executed a single iteration and the tab
+#     was empty on every scan ever run. Prefetch used a different code path,
+#     which is why it showed 333 while BAM showed 0.
+#
+#   NEW:
+#   * Dedicated BAM parser with its own pass, deliberately NOT filtered by the
+#     selected scan window. The tab is a complete execution record (account,
+#     exe, path, last run, tier); findings still come from the time-filtered
+#     path. An empty BAM store is now itself a REVIEW finding.
+#   * Windows install date + last boot + uptime in the banner, Status tab and
+#     report header. An install less than 7 days old raises a REVIEW finding:
+#     a reinstall erases every artifact this tool depends on, so a clean scan
+#     on a fresh machine carries little weight.
+#
+#   UI:
+#   * Findings and the HTML report are ordered Tier A -> B -> C -> untiered,
+#     then by severity, then alphabetically.
+#   * Prefetch tab sorts most-run-first, with the Runs column moved left.
+#   * Timestamps render as "Aug 05, 2026 12:40:31 AM PDT" instead of bare
+#     24-hour local time with no zone.
+#   * Snapshot delta no longer prints every entry to the console -- 402 rows
+#     buried the rest of the scan. Console gets counts and criticals; the
+#     per-entry detail stays in the Delta tab.
+#   * Status tab opens with the machine environment block.
+#
+# v5.0 -- FINAL
+#   REMOVED:
+#   * Roblox log file scanning. The markers it looked for appear in ordinary
+#     client script errors, and the section produced no true positives across
+#     six live runs.
+#
+#   ADDED (ported from the Tier 3 v6 lineage):
+#   * Defender threat history (Get-MpThreatDetection). A first-party detection
+#     is stronger evidence than any name match this tool produces. Active
+#     detections are CRITICAL; remediated ones are REVIEW.
+#   * AMSI bypass registry keys (AmsiEnable=0, per-user CLSID hijack).
+#     Counting providers was not enough -- AMSI can be present but disabled.
+#   * Defender ETW autologger presence.
+#   * PowerShell script block logging status (context).
+#   * AppInit_DLLs -- injects a DLL into every process linking user32.
+#   * IFEO Debugger hijack -- running program X silently launches binary Y.
+#   * Event 104 (System log cleared). Previously only 1102 (Security) was read.
+#   * Windows build, activation state and shadow copy count in the report header.
+#
+# v5.0 -- MEMORY SUBSYSTEM
+#   * NEW: MEM_MAPPED executable regions are now detected. v4.5-v4.7 examined
+#     PRIVATE memory only, so section-mapped injection (NtCreateSection +
+#     NtMapViewOfSection) was structurally invisible -- and that technique is
+#     used precisely because PRIVATE-only scanners cannot see it.
+#   * NEW: injection-host scan (explorer, rundll32, dllhost, regsvr32, mshta,
+#     wscript, cscript, notepad). STRUCTURAL ONLY -- unbacked/mapped executable
+#     memory and anomalous thread entry points. Deliberately NOT string
+#     matching: explorer holds the path of every file the user has browsed, so
+#     string-scanning it (as Tier 3 v6 did) flags files merely SEEN in a folder.
+#   * RWX private regions are now CRITICAL rather than a flat REVIEW.
+#   * Region type (IMAGE / MAPPED / PRIVATE) is reported per finding. Every
+#     memory hit previously claimed "PRIVATE" regardless of where it came from.
+#   * Hollowing check reports WHICH condition tripped, and adds the
+#     not-committed case.
+#   * Coverage line now distinguishes string coverage (a fraction of PRIVATE)
+#     from executable-region coverage (all regions).
 #
 # v4.7
 #   RESTORED (dropped in the v4.5 rewrite, absent for four builds):
@@ -546,19 +612,6 @@ $commonDriverSkipList = @(
     "vgk","vgc","vanguard","riotvanguard"
 )
 
-# Roblox log markers. Split: HIGH = executor API only. NOISE = appears in
-# ordinary client stack traces, kept as context so it can be reviewed.
-$robloxLogMarkersHigh = @(
-    "dll injection","hookfunction","getrawmetatable",
-    "newcclosure","hookmetamethod","setreadonly",
-    "decompilefunction","getnamecallmethod",
-    "syn.","fluxus.","celery.","krnl."
-)
-$robloxLogMarkersNoise = @(
-    "inject","decompile","debug.getinfo","loadstring",
-    "require(","game:getservice","httpget","httppost"
-)
-
 $remoteExecPatterns = @(
     @{ Pattern = "iex (iwr";                             Label = "Remote script via iex/iwr" },
     @{ Pattern = "invoke-expression (invoke-webrequest"; Label = "Remote script execution" },
@@ -761,9 +814,9 @@ foreach ($s in @(
     "Persistence","PowerShell History","Event Log Evidence",
     "Roblox Client Integrity","Loaded Modules",
     "Process Memory","Named Pipes","Process Handles",
-    "Kernel Drivers","Launch Chain","Roblox Logs",
+    "Kernel Drivers","Launch Chain",
     "Download Provenance","Crash Artifacts","Hash Blocklist",
-    "Renamed Binaries","Deleted Files","Browser Downloads",
+    "Renamed Binaries","Deleted Files","Browser Downloads","Injection Hosts",
     "Entropy","Snapshot Delta"
 )) { Register-Section $s }
 
@@ -1129,6 +1182,65 @@ function Get-RobloxProcs {
     return $procs
 }
 
+# 24-hour timestamps are hard to scan quickly in a GUI. Reports keep ISO
+# format (sortable, unambiguous); the on-screen viewer uses 12-hour local.
+$script:TzAbbr = ""
+try {
+    $tz = [System.TimeZoneInfo]::Local
+    $isDst = $tz.IsDaylightSavingTime((Get-Date))
+    $nm = if ($isDst) { $tz.DaylightName } else { $tz.StandardName }
+    $script:TzAbbr = -join ($nm -split '\s+' | ForEach-Object { if ($_.Length -gt 0) { $_[0] } })
+} catch { $script:TzAbbr = "" }
+
+function Format-ViewTime($val) {
+    if (-not $val) { return "" }
+    $d = $null
+    try { $d = [DateTime]::Parse([string]$val) } catch { return [string]$val }
+    $out = $d.ToString("MMM dd, yyyy h:mm:ss tt")
+    if ($script:TzAbbr) { $out = "$out $script:TzAbbr" }
+    return $out
+}
+
+function Format-ViewTimeList($val) {
+    if (-not $val) { return "" }
+    return (([string]$val) -split '\s*\|\s*' | Where-Object { $_ } | ForEach-Object { Format-ViewTime $_ }) -join "  |  "
+}
+
+# ---- Time formatting -------------------------------------------------
+# Reports were printing 24-hour local time with no zone, so a moderator in a
+# different region could not line a finding up against a match recording.
+$script:TzInfo = [System.TimeZoneInfo]::Local
+$script:TzAbbr = ""
+try {
+    $tzName = if ($script:TzInfo.IsDaylightSavingTime((Get-Date))) { $script:TzInfo.DaylightName } else { $script:TzInfo.StandardName }
+    $script:TzAbbr = -join (@($tzName -split '\s+') | ForEach-Object { if ($_.Length -gt 0) { $_[0] } })
+} catch { $script:TzAbbr = "local" }
+if (-not $script:TzAbbr) { $script:TzAbbr = "local" }
+
+function Format-Stamp($dt) {
+    if (-not $dt) { return "" }
+    try { return "$($dt.ToString('MMM dd, yyyy h:mm:ss tt')) $script:TzAbbr" } catch { return [string]$dt }
+}
+
+# Re-format the "yyyy-MM-dd HH:mm:ss" strings held in the viewer collections.
+function Format-StampStr($str) {
+    if (-not $str) { return "" }
+    $d = [datetime]::MinValue
+    if ([datetime]::TryParseExact([string]$str, 'yyyy-MM-dd HH:mm:ss', $null, 'None', [ref]$d)) {
+        return Format-Stamp $d
+    }
+    return [string]$str
+}
+
+function Get-RegionTypeName($type) {
+    switch ($type) {
+        0x1000000 { return "IMAGE" }    # backed by a file on disk
+        0x40000   { return "MAPPED" }   # backed by a section object
+        0x20000   { return "PRIVATE" }  # anonymous -- VirtualAlloc
+        default   { return "UNKNOWN" }
+    }
+}
+
 function Get-ProtectionName($protect) {
     switch ($protect -band 0xFF) {
         0x01 { return "NOACCESS" }
@@ -1267,13 +1379,13 @@ function Write-Banner {
     Clear-Host
     Write-Host ""
     Write-Host "  +=================================================+" -ForegroundColor Cyan
-    Write-Host "  |   ROBLOX CHEAT SCANNER v4.7                    |" -ForegroundColor Cyan
+    Write-Host "  |   ROBLOX CHEAT SCANNER v5.0                    |" -ForegroundColor Cyan
     Write-Host "  |   PROPERTY OF JD                               |" -ForegroundColor DarkGray
     Write-Host "  +=================================================+" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  Computer : $env:COMPUTERNAME" -ForegroundColor Gray
     Write-Host "  User     : $env:USERNAME"     -ForegroundColor Gray
-    Write-Host "  Time     : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') (UTC$tzOffset)" -ForegroundColor Gray
+    Write-Host "  Time     : $(Format-Stamp (Get-Date))" -ForegroundColor Gray
     Write-Host ""
 }
 function Write-Header($title, $color = "Cyan") {
@@ -1374,7 +1486,8 @@ function Get-CurrentSnapshot {
             foreach ($bk in @(Get-ChildItem $bamBase -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -ne "S-1-5-18" })) {
                 $regKey = Get-Item $bk.PSPath -ErrorAction SilentlyContinue
                 if (-not $regKey) { continue }
-                $propNames = try { $regKey.GetValueNames() } catch { @() }
+                $propNames = @()
+                try { $propNames = @($regKey.GetValueNames()) } catch { $propNames = @() }
                 foreach ($prop in $propNames) {
                     if ($prop -in @("SequenceNumber","Version","")) { continue }
                     try {
@@ -1557,8 +1670,11 @@ function Compare-Snapshots($previous, $current) {
             if ($isFP) { Add-FP "$category-Added" $e "matched $label false-positive list"; continue }
             if ($m) {
                 $sev = Get-SeverityForMatch $m "Critical"
-                $txt = "$label ADDED: $e -- matches '$($m.Term)' [Tier $($m.Tier)/$($m.Match)]"
-                if ($sev -eq "Critical") { Write-Hit $txt } elseif ($sev -eq "Review") { Write-Amber $txt } else { Write-Ctx $txt }
+                # Console prints only Tier A. Everything else lands in the Delta
+                # tab of the viewer -- 400+ rows of console text buries the scan.
+                if ($m.Tier -eq "A") {
+                    Write-Hit "$label ADDED: $e -- matches '$($m.Term)' [Tier A/$($m.Match)]"
+                }
                 Add-Finding -Section "Snapshot Delta" -Type "$category-Added" -Detail $e `
                     -Value $m.Term -Severity $sev -Tier $m.Tier
                 $deltaFindings.Add([PSCustomObject]@{ Category=$label; Change="ADDED-HIT"; Entry=$e; Note="$($m.Term) [Tier $($m.Tier)]"; Severity=$sev })
@@ -1602,8 +1718,7 @@ function Compare-Snapshots($previous, $current) {
             # Deletion of a CHEAT-named artifact is meaningful. Deletion of an
             # ordinary one is routine cache eviction and is context only.
             $sev = if ($m -and $m.Tier -eq "A") { "Critical" } else { $treatDeleteAs }
-            $txt = "$label DELETED: $e"
-            if ($sev -eq "Critical") { Write-Critical "$txt -- was '$($m.Term)'" } else { Write-Ctx $txt }
+            if ($sev -eq "Critical") { Write-Critical "$label DELETED: $e -- was '$($m.Term)'" }
             Add-Finding -Section "Snapshot Delta" -Type "$category-Deleted" -Detail $e `
                 -Value $(if ($m) { $m.Term } else { "" }) -Severity $sev -Tier $(if ($m) { $m.Tier } else { "" })
             $deltaFindings.Add([PSCustomObject]@{ Category=$label; Change="DELETED"; Entry=$e; Note="no longer present"; Severity=$sev })
@@ -1631,7 +1746,9 @@ function Compare-Snapshots($previous, $current) {
 
     Mark-Ran "Snapshot Delta"
     Write-Host ""
-    Write-Host "  Delta rows recorded: $($deltaFindings.Count) (scored: $($script:Sections['Snapshot Delta'].Critical + $script:Sections['Snapshot Delta'].Review))" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Delta rows recorded: $($deltaFindings.Count)  (scored: $($script:Sections['Snapshot Delta'].Critical + $script:Sections['Snapshot Delta'].Review))" -ForegroundColor DarkGray
+    Write-Host "  Full detail is in the DELTA tab of the viewer -- only Tier A is printed here." -ForegroundColor DarkGray
     Write-SectionResult "Snapshot Delta"
 }
 
@@ -1718,6 +1835,83 @@ function Run-Section1 {
         }
     } catch { Write-Warn "Could not query Defender exclusions" }
 
+    # Defender's own detection history. If Defender already caught and
+    # quarantined an executor, that is a first-party detection -- far stronger
+    # than any name match this tool produces.
+    # Environment facts. Context only -- these do not indicate cheating, they
+    # tell a reviewer what kind of machine produced the report.
+    Write-Info "Windows environment..."
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $ubr = try { (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -EA Stop).UBR } catch { "" }
+        $script:OsCaption = "$($os.Caption) build $($os.BuildNumber)$(if($ubr){".$ubr"})"
+        $script:BootTime   = Format-Stamp $os.LastBootUpTime
+        $script:UptimeStr  = "{0:N1} hours" -f ((Get-Date) - $os.LastBootUpTime).TotalHours
+        try {
+            $script:InstallDate = Format-Stamp $os.InstallDate
+            $ageDays = [math]::Round(((Get-Date) - $os.InstallDate).TotalDays)
+            $script:InstallAge  = "$ageDays days ago"
+        } catch { $script:InstallDate = "unknown"; $script:InstallAge = "" }
+        Write-Info "  $script:OsCaption"
+        Write-Info "  Installed: $script:InstallDate ($script:InstallAge)"
+        Write-Info "  Booted:    $script:BootTime (up $script:UptimeStr)"
+        # A Windows install only days old is worth a reviewer's attention: a
+        # reinstall wipes every artifact this tool relies on.
+        if ($ageDays -le 7) {
+            Write-Amber "  Windows was installed $ageDays day(s) ago -- all historical artifacts are missing by definition"
+            Add-Finding -Section "System Protection" -Type "RecentWindowsInstall" `
+                -Detail "Windows installed $script:InstallDate ($ageDays days ago)" -Severity "Review" `
+                -Evidence "a recent reinstall removes BAM, Prefetch, Shimcache, AmCache and UserAssist history; a clean scan on such a machine carries little weight"
+        }
+        Add-Finding -Section "System Protection" -Type "Environment" -Detail $script:OsCaption `
+            -Value "boot $($os.LastBootUpTime.ToString('yyyy-MM-dd HH:mm:ss'))" -Severity "Context"
+    } catch { $script:OsCaption = "unknown" }
+
+    try {
+        $lic = Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND Name LIKE 'Windows%'" -EA Stop | Select-Object -First 1
+        if ($lic) {
+            $state = switch ($lic.LicenseStatus) { 1 {"Licensed"} 2 {"Grace"} 3 {"Grace (OOT)"} 5 {"Notification"} default {"Unlicensed/other ($($lic.LicenseStatus))"} }
+            Write-Info "  Activation: $state"
+            $script:ActivationState = $state
+        }
+    } catch { $script:ActivationState = "unknown" }
+
+    Write-Info "Volume shadow copies..."
+    try {
+        $shadows = @(Get-CimInstance Win32_ShadowCopy -ErrorAction Stop)
+        if ($shadows.Count -gt 0) {
+            Write-OK "Shadow copies available: $($shadows.Count) (AmCache can be read)"
+        } else {
+            Write-Warn "No shadow copies -- AmCache cannot be read on this machine"
+        }
+        $script:ShadowCount = $shadows.Count
+    } catch { $script:ShadowCount = 0 }
+
+    Write-Info "Defender threat history..."
+    try {
+        $threats = @(Get-MpThreatDetection -ErrorAction Stop | Sort-Object InitialDetectionTime -Descending | Select-Object -First 50)
+        if ($threats.Count -eq 0) { Write-OK "No Defender threat detections recorded" }
+        foreach ($t in $threats) {
+            $name = ""
+            try { $name = (Get-MpThreat -ThreatID $t.ThreatID -ErrorAction SilentlyContinue).ThreatName } catch {}
+            if (-not $name) { $name = "ThreatID $($t.ThreatID)" }
+            $when = try { $t.InitialDetectionTime.ToString("yyyy-MM-dd HH:mm:ss") } catch { "unknown" }
+            if ($script:ScanDaysBack -lt 9999 -and $t.InitialDetectionTime -lt $script:ScanCutoff) { continue }
+            $res  = [string]$t.ThreatStatusID
+            $files = ""
+            try { $files = ($t.Resources -join "; ") } catch {}
+            # Active/pending = still on the machine. Remediated = Defender dealt with it.
+            $active = ($t.ThreatStatusID -in @(1,102,103))
+            $sev = if ($active) { "Critical" } else { "Review" }
+            $txt = "Defender detected '$name' at $when (status $res)"
+            if ($sev -eq "Critical") { Write-Hit "$txt -- ACTIVE" } else { Write-Amber $txt }
+            Add-Finding -Section "System Protection" -Type "DefenderDetection" -Detail $name `
+                -Value $when -Severity $sev -Tier "A" `
+                -Evidence "first-party Defender detection. Resources: $files"
+            Add-Timeline "Defender detection: $name at $when"
+        }
+    } catch { Write-Skip "Defender threat history unavailable" }
+
     Write-Info "Memory Integrity (HVCI)..."
     try {
         $dg = Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard -ErrorAction Stop
@@ -1746,6 +1940,59 @@ function Run-Section1 {
             else { Write-Fail "No AMSI providers -- possible bypass"
                    Add-Finding -Section "System Protection" -Type "AMSIStripped" -Detail "No AMSI providers registered" -Severity "Review" }
         }
+    } catch {}
+
+    # Counting providers is not enough: AMSI can be present but switched off.
+    Write-Info "AMSI bypass keys..."
+    try {
+        $amsiOff = 0
+        foreach ($k in @("HKCU:\Software\Classes\CLSID\{fdb00e52-a214-4aa1-8fba-4357bb0072ec}",
+                         "HKLM:\SOFTWARE\Microsoft\Windows Script\Settings",
+                         "HKCU:\SOFTWARE\Microsoft\Windows Script\Settings")) {
+            if (-not (Test-Path $k)) { continue }
+            $props = Get-ItemProperty $k -ErrorAction SilentlyContinue
+            if (-not $props) { continue }
+            if ($props.AmsiEnable -eq 0 -or $props.AmsiEnabled -eq 0) {
+                Write-Critical "AMSI disabled via registry: $k"
+                Add-Finding -Section "System Protection" -Type "AMSIBypassKey" -Detail $k `
+                    -Severity "Critical" -Tier "A" `
+                    -Evidence "AmsiEnable=0 switches off script scanning; this is not a default and is not set by any normal software"
+                Add-Timeline "AMSI disabled via registry: $k"
+                $amsiOff++
+            } elseif ($k -like "*CLSID*") {
+                Write-Amber "AMSI CLSID hijack key present: $k"
+                Add-Finding -Section "System Protection" -Type "AMSIClsidKey" -Detail $k -Severity "Review" `
+                    -Evidence "a per-user CLSID entry for the AMSI COM object -- used to redirect AMSI to a stub"
+                $amsiOff++
+            }
+        }
+        if ($amsiOff -eq 0) { Write-OK "No AMSI bypass keys" }
+    } catch {}
+
+    Write-Info "Defender ETW autologger..."
+    try {
+        $etw = "HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger"
+        if (Test-Path $etw) {
+            $loggers = @(Get-ChildItem $etw -ErrorAction SilentlyContinue)
+            $defLogger = @($loggers | Where-Object { $_.PSChildName -like "*Defender*" -or $_.PSChildName -like "*WdNisDrv*" -or $_.PSChildName -like "*DefenderApiLogger*" })
+            if ($defLogger.Count -gt 0) { Write-OK "Defender ETW autologger present" }
+            else {
+                Write-Amber "Defender ETW autologger not found among $($loggers.Count) autologgers"
+                Add-Finding -Section "System Protection" -Type "ETWLoggerMissing" `
+                    -Detail "Defender autologger absent" -Severity "Review" `
+                    -Evidence "removing the autologger blinds Defender's telemetry; also absent on some Windows editions, so verify before relying on it"
+            }
+        }
+    } catch { Write-Skip "ETW autologger check unavailable" }
+
+    Write-Info "PowerShell script block logging..."
+    try {
+        $sb = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
+        if (Test-Path $sb) {
+            $en = (Get-ItemProperty $sb -ErrorAction SilentlyContinue).EnableScriptBlockLogging
+            if ($en -eq 1) { Write-OK "Script block logging: enabled" }
+            else { Write-Ctx "Script block logging: configured but disabled" }
+        } else { Write-Ctx "Script block logging: not configured (Windows default)" }
     } catch {}
 
     Write-Info "WMI event subscriptions..."
@@ -1946,7 +2193,9 @@ function Run-Section3 {
             foreach ($bk in @(Get-ChildItem $bamBase -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -ne "S-1-5-18" })) {
                 $regKey = Get-Item $bk.PSPath -ErrorAction SilentlyContinue
                 if (-not $regKey) { continue }
-                foreach ($prop in (try { $regKey.GetValueNames() } catch { @() })) {
+                $bamProps = @()
+                try { $bamProps = @($regKey.GetValueNames()) } catch { $bamProps = @() }
+                foreach ($prop in $bamProps) {
                     if ($prop -in @("SequenceNumber","Version","")) { continue }
                     try {
                         $raw = $regKey.GetValue($prop)
@@ -1956,8 +2205,6 @@ function Run-Section3 {
                         $lr = [DateTime]::FromFileTimeUtc($ft).AddMinutes(-$bias)
                         if ($script:ScanDaysBack -lt 9999 -and $lr -lt $script:ScanCutoff) { continue }
                         $lrStr = $lr.ToString("yyyy-MM-dd HH:mm:ss")
-                        $entry = [PSCustomObject]@{ Path=$prop; LastRun=$lrStr; SID=$bk.PSChildName; Flagged=$false; Match=""; Tier="" }
-                        $bamViewerData.Add($entry)
                         if (Is-BAMFalsePositive $prop) { Add-FP "BAM" $prop "BAM FP list"; continue }
                         $m = Test-CheatMatch $prop
                         if ($m) {
@@ -1967,7 +2214,6 @@ function Run-Section3 {
                             Add-Finding -Section "Execution Artifacts" -Type "BAM" -Detail $prop `
                                 -Value $m.Term -Severity $sev -Tier $m.Tier -Evidence "last run $lrStr"
                             Add-Timeline "BAM: $prop ran $lrStr"
-                            $entry.Flagged = $true; $entry.Match = $m.Term; $entry.Tier = $m.Tier
                             $n++
                         }
                     } catch { continue }
@@ -2126,6 +2372,99 @@ function Scan-PrefetchParallel($pfFiles) {
 }
 
 # =====================================================
+# BAM PARSER  (dedicated, all-time)
+#
+# HKLM\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings\<SID>
+# Each value name is an NT device path; the value's first 8 bytes are a
+# FILETIME of the last execution. BAM proves EXECUTION, unlike Shimcache or
+# MUICache, and Windows keeps roughly the last 7 days of it.
+#
+# This pass is deliberately unfiltered by the scan window -- the tab is a
+# complete execution record for a reviewer to read, and findings are still
+# raised through the normal time-filtered path in Run-Section3.
+# =====================================================
+function Get-BAMEntries {
+    $out = [System.Collections.Generic.List[object]]::new()
+    $bamBase = "HKLM:\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings"
+    if (-not (Test-Path $bamBase)) { return $out }
+
+    $bias = 0L
+    try {
+        $tz = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation" -ErrorAction Stop
+        if ($null -ne $tz.ActiveTimeBias) { $bias = [int64]$tz.ActiveTimeBias }
+    } catch {}
+
+    foreach ($bk in @(Get-ChildItem $bamBase -ErrorAction SilentlyContinue)) {
+        $sid = $bk.PSChildName
+        if ($sid -eq "S-1-5-18") { continue }          # LocalSystem
+        $account = $sid
+        try {
+            $account = (New-Object System.Security.Principal.SecurityIdentifier($sid)).Translate([System.Security.Principal.NTAccount]).Value
+        } catch {}
+
+        $regKey = Get-Item $bk.PSPath -ErrorAction SilentlyContinue
+        if (-not $regKey) { continue }
+        $names = @()
+        try { $names = @($regKey.GetValueNames()) } catch { continue }
+
+        foreach ($prop in $names) {
+            if ($prop -in @("SequenceNumber","Version","")) { continue }
+            try {
+                $raw = $regKey.GetValue($prop)
+                if (-not $raw -or $raw -isnot [byte[]] -or $raw.Length -lt 8) { continue }
+                $ft = [System.BitConverter]::ToInt64($raw, 0)
+                if ($ft -le 0 -or $ft -gt 999999999999999999) { continue }
+                $lr = [DateTime]::FromFileTimeUtc($ft).AddMinutes(-$bias)
+
+                # \Device\HarddiskVolume3\Users\x\y.exe  ->  Users\x\y.exe
+                $friendly = $prop -replace '^\\Device\\HarddiskVolume\d+\\', ''
+                $leaf = try { [IO.Path]::GetFileName($friendly) } catch { $friendly }
+
+                $isFP = Is-BAMFalsePositive $prop
+                $m    = if ($isFP) { $null } else { Test-CheatMatch $prop }
+
+                $out.Add([PSCustomObject]@{
+                    Account   = $account
+                    SID       = $sid
+                    Exe       = $leaf
+                    Path      = $friendly
+                    RawPath   = $prop
+                    LastRun   = $lr
+                    LastRunStr= Format-Stamp $lr
+                    Tier      = if ($m) { $m.Tier } else { "" }
+                    Match     = if ($m) { $m.Term } else { "" }
+                    Suppressed= $isFP
+                }) | Out-Null
+            } catch { continue }
+        }
+    }
+    return $out
+}
+
+function Run-BAMParser {
+    Write-Header "BAM PARSER (all recorded executions)"
+    $entries = Get-BAMEntries
+    if ($entries.Count -eq 0) {
+        Write-Warn "BAM returned NO entries. On a machine in normal use this store is never empty --"
+        Write-Warn "  either the key is unreadable or it was cleared. This is NOT a clean result."
+        Add-Finding -Section "Execution Artifacts" -Type "BAMEmpty" `
+            -Detail "BAM UserSettings contains no execution records" -Severity "Review" `
+            -Evidence "BAM normally holds ~7 days of executions; an empty store indicates removal or a read failure"
+        Write-Host ""
+        return
+    }
+    foreach ($e in $entries) { $bamViewerData.Add($e) }
+    $accounts = @($entries | Group-Object Account)
+    Write-OK "$($entries.Count) execution record(s) across $($accounts.Count) account(s)"
+    foreach ($a in $accounts) { Write-Info "  $($a.Name): $($a.Count)" }
+    $oldest = ($entries | Sort-Object LastRun | Select-Object -First 1).LastRun
+    $newest = ($entries | Sort-Object LastRun -Descending | Select-Object -First 1).LastRun
+    Write-Info "  coverage: $(Format-Stamp $oldest)  ->  $(Format-Stamp $newest)"
+    Write-Info "  full list is in the BAM tab of the viewer"
+    Write-Host ""
+}
+
+# =====================================================
 # SECTION 4 -- PERSISTENCE
 # =====================================================
 function Run-Section4 {
@@ -2209,6 +2548,60 @@ function Run-Section4 {
         }
     } catch { Write-Skip "Scheduled task enumeration failed" }
     if ($n -eq 0) { Write-OK "Scheduled tasks: nothing" }
+
+    # AppInit_DLLs loads an arbitrary DLL into every process that links
+    # user32.dll. Legacy, rarely used legitimately, and completely absent from
+    # every previous build of this scanner.
+    Write-Info "AppInit_DLLs..."
+    $ai = 0
+    foreach ($aiPath in @("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows",
+                          "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\Windows")) {
+        if (-not (Test-Path $aiPath)) { continue }
+        $props = Get-ItemProperty $aiPath -ErrorAction SilentlyContinue
+        if (-not $props) { continue }
+        $dlls = [string]$props.AppInit_DLLs
+        if (-not $dlls -or $dlls.Trim() -eq "") { continue }
+        $enabled = ($props.LoadAppInit_DLLs -eq 1)
+        $m = Test-CheatMatch $dlls
+        $sev = if ($enabled) { "Critical" } else { "Review" }
+        $txt = "AppInit_DLLs$(if(-not $enabled){' [configured but LoadAppInit_DLLs=0]'}): $dlls"
+        if ($sev -eq "Critical") { Write-Critical $txt } else { Write-Amber $txt }
+        Add-Finding -Section "Persistence" -Type "AppInitDLL" -Detail $dlls `
+            -Value $(if ($m) { $m.Term } else { "" }) -Severity $sev -Tier $(if ($m) { $m.Tier } else { "A" }) `
+            -Evidence "AppInit_DLLs injects the listed DLL into every process loading user32.dll; LoadAppInit_DLLs=$($props.LoadAppInit_DLLs)"
+        Add-Timeline "AppInit_DLLs configured: $dlls"
+        $ai++
+    }
+    if ($ai -eq 0) { Write-OK "AppInit_DLLs: not configured" }
+
+    # IFEO Debugger: setting a "debugger" for an executable means YOUR binary
+    # runs instead of it. Invisible to run keys, tasks and services.
+    Write-Info "Image File Execution Options (debugger hijack)..."
+    $ifeo = 0
+    $knownDebuggers = @("vsjitdebugger.exe","drwtsn32.exe","windbg.exe","ntsd.exe","cdb.exe","procdump.exe","werfault.exe")
+    foreach ($base in @("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options",
+                        "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options")) {
+        if (-not (Test-Path $base)) { continue }
+        foreach ($k in @(Get-ChildItem $base -ErrorAction SilentlyContinue)) {
+            $props = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+            if (-not $props) { continue }
+            $dbg = [string]$props.Debugger
+            if (-not $dbg -or $dbg.Trim() -eq "") { continue }
+            $dl = $dbg.ToLower()
+            $known = $false
+            foreach ($kd in $knownDebuggers) { if ($dl -like "*$kd*") { $known = $true; break } }
+            if ($known) { Add-FP "IFEO" "$($k.PSChildName) -> $dbg" "recognised debugger"; continue }
+            $m = Test-CheatMatch $dbg
+            $sev = if ($m -and $m.Tier -eq "A") { "Critical" } else { "Critical" }
+            Write-Critical "IFEO hijack: running '$($k.PSChildName)' launches '$dbg' instead"
+            Add-Finding -Section "Persistence" -Type "IFEODebugger" -Detail "$($k.PSChildName) -> $dbg" `
+                -Value $(if ($m) { $m.Term } else { "" }) -Severity $sev -Tier "A" `
+                -Evidence "Image File Execution Options Debugger value: launching the named program runs this binary instead"
+            Add-Timeline "IFEO hijack: $($k.PSChildName) -> $dbg"
+            $ifeo++
+        }
+    }
+    if ($ifeo -eq 0) { Write-OK "IFEO: no unrecognised debugger entries" }
 
     Write-Info "Hidden process check..."
     try {
@@ -2526,6 +2919,26 @@ function Run-Section7 {
         }
     }
 
+    # Event 104: System log cleared. v4.x read 1102 (Security) only, so a
+    # System-log wipe passed in silence.
+    Write-Info "System log clear events (104)..."
+    try {
+        $c104 = @(Get-WinEvent -FilterHashtable @{ LogName="System"; Id=104 } -MaxEvents 20 -ErrorAction Stop |
+                  Where-Object { $script:ScanDaysBack -ge 9999 -or $_.TimeCreated -ge $script:ScanCutoff })
+        foreach ($ev in $c104) {
+            $msg = "System log CLEARED at $($ev.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))"
+            Write-Critical $msg
+            Add-Finding -Section "Event Log Evidence" -Type "SystemLogClear" -Detail $msg -Value "Event 104" -Severity "Review" `
+                -Evidence "also routine during troubleshooting; treat as corroboration, not proof. Combined with a 1102 in the same window it is much stronger."
+            Add-Timeline $msg
+            Mark-Ran "Event Log Evidence"
+        }
+        if ($c104.Count -eq 0) { Write-OK "No System log clears in range" }
+    } catch {
+        if ($_.Exception.Message -match 'No events were found') { Write-OK "No System log clears in range" }
+        else { Write-Skip "Event 104 could not be read" }
+    }
+
     Write-SectionResult "Event Log Evidence"
 }
 
@@ -2755,7 +3168,13 @@ function Test-ProcessHollowing($procPid) {
         $mbi = New-Object Win32Mem+MEMORY_BASIC_INFORMATION
         $sz  = [uint32][System.Runtime.InteropServices.Marshal]::SizeOf($mbi)
         if ([Win32Mem]::VirtualQueryEx($hProc, $imageBase, [ref]$mbi, $sz) -eq 0) { return @{ Result = $null; Reason = "VirtualQueryEx failed" } }
-        return @{ Result = ($mbi.Type -eq [Win32Mem]::MEM_PRIVATE); Reason = "" }
+        if ($mbi.Type -eq [Win32Mem]::MEM_PRIVATE) {
+            return @{ Result = $true; Reason = "PEB ImageBase resides in PRIVATE memory (not file-backed)" }
+        }
+        if ($mbi.State -ne [Win32Mem]::MEM_COMMIT) {
+            return @{ Result = $true; Reason = "PEB ImageBase is not committed memory" }
+        }
+        return @{ Result = $false; Reason = "" }
     } finally { [void][Win32Mem]::CloseHandle($hProc) }
 }
 
@@ -2766,6 +3185,7 @@ function Scan-RobloxProcessMemory($procPid, $pname, $ppath) {
         ProductHits=[System.Collections.Generic.List[object]]::new()
         ChatHits=[System.Collections.Generic.List[object]]::new()
         UnbackedExec=[System.Collections.Generic.List[object]]::new()
+        MappedExec=[System.Collections.Generic.List[object]]::new()
         Regions=0; ScannedBytes=0; TotalPrivateBytes=0; Truncated=$false; Error=$null
     }
     $hProc = [Win32Mem]::OpenProcess([Win32Mem]::PROCESS_VM_READ -bor [Win32Mem]::PROCESS_QUERY_INFORMATION, $false, $procPid)
@@ -2784,6 +3204,20 @@ function Scan-RobloxProcessMemory($procPid, $pname, $ppath) {
             }
             $res.Regions++
             $size = $mbi.RegionSize.ToInt64()
+
+            # ---- MAPPED executable memory (section-mapped injection) ----
+            if ($mbi.State -eq [Win32Mem]::MEM_COMMIT -and $mbi.Type -eq [Win32Mem]::MEM_MAPPED) {
+                $prot    = $mbi.Protect
+                $guarded = ($prot -band [Win32Mem]::PAGE_GUARD) -ne 0
+                if ((($prot -band 0xF0) -ne 0) -and -not $guarded) {
+                    $res.MappedExec.Add([PSCustomObject]@{
+                        Address="0x$($mbi.BaseAddress.ToInt64().ToString('X16'))"
+                        SizeKB=[math]::Round($size/1KB,1); Protection=(Get-ProtectionName $prot)
+                        Writable=(($prot -band 0xCC) -ne 0)
+                    }) | Out-Null
+                }
+            }
+
             if ($mbi.State -eq [Win32Mem]::MEM_COMMIT -and $mbi.Type -eq [Win32Mem]::MEM_PRIVATE) {
                 $res.TotalPrivateBytes += $size
                 $protect  = $mbi.Protect
@@ -2804,7 +3238,7 @@ function Scan-RobloxProcessMemory($procPid, $pname, $ppath) {
                         foreach ($h in (Search-MemoryRegion $buf $br)) {
                             $obj = [PSCustomObject]@{
                                 String=$h.S; Address="0x$($av.ToString('X16'))"
-                                Region="PRIVATE/$(Get-ProtectionName $protect)"; SizeKB=[math]::Round($br/1KB,1)
+                                Region="$(Get-RegionTypeName $mbi.Type)/$(Get-ProtectionName $protect)"; SizeKB=[math]::Round($br/1KB,1)
                             }
                             switch ($h.Class) {
                                 "High"    { $res.HighHits.Add($obj)    | Out-Null }
@@ -2957,7 +3391,7 @@ function Run-MemoryScan {
             } else {
                 $anyOpened = $true
                 $pct = if ($r.TotalPrivateBytes -gt 0) { [math]::Round(($r.ScannedBytes / $r.TotalPrivateBytes) * 100, 1) } else { 0 }
-                $cov = "$($proc.ProcessName)/$($proc.Id): scanned $([math]::Round($r.ScannedBytes/1MB,1))MB of $([math]::Round($r.TotalPrivateBytes/1MB,1))MB private ($pct%)"
+                $cov = "$($proc.ProcessName)/$($proc.Id): strings scanned in $([math]::Round($r.ScannedBytes/1MB,1))MB of $([math]::Round($r.TotalPrivateBytes/1MB,1))MB PRIVATE ($pct%); executable-region check covered PRIVATE + MAPPED across all $($r.Regions) regions"
                 if ($r.Truncated) { $cov += " [TRUNCATED at cap]" }
                 $covLines.Add($cov) | Out-Null
                 Write-Info "  $cov"
@@ -2988,9 +3422,24 @@ function Run-MemoryScan {
                         -Severity "Context" -Evidence "chat text and game UI reach private memory; not evidence on its own"
                 }
                 foreach ($ub in ($r.UnbackedExec | Where-Object { $_.SizeKB -gt 256 })) {
-                    Write-Amber "Large private executable region: $($ub.Address) [$($ub.Protection)] $($ub.SizeKB)KB"
+                    $rwx = $ub.Protection -eq "EXECUTE_READWRITE"
+                    $sev = if ($rwx) { "Critical" } else { "Review" }
+                    $txt = "Private executable region: $($ub.Address) [$($ub.Protection)] $($ub.SizeKB)KB"
+                    if ($sev -eq "Critical") { Write-Critical "$txt -- RWX" } else { Write-Amber $txt }
                     Add-Finding -Section "Process Memory" -Type "UnbackedExec" -Detail $ub.Address `
-                        -Value "$($ub.SizeKB)KB $($ub.Protection)" -Severity "Review"
+                        -Value "$($ub.SizeKB)KB $($ub.Protection)" -Severity $sev `
+                        -Evidence "anonymous executable memory inside the client; RWX has few legitimate uses outside a JIT"
+                }
+                # Section-mapped executable memory. v4.5-v4.7 read only PRIVATE
+                # regions, so this whole injection class was invisible.
+                foreach ($mp in ($r.MappedExec | Where-Object { $_.SizeKB -gt 128 })) {
+                    Write-Amber "MAPPED executable region: $($mp.Address) [$($mp.Protection)] $($mp.SizeKB)KB"
+                    Add-Finding -Section "Process Memory" -Type "MappedExec" -Detail $mp.Address `
+                        -Value "$($mp.SizeKB)KB $($mp.Protection)" -Severity "Review" `
+                        -Evidence "section-mapped executable memory -- the standard way to evade a PRIVATE-only scanner. Some runtimes map code legitimately; corroborate with the module and thread checks."
+                }
+                if ($r.MappedExec.Count -gt 0 -or $r.UnbackedExec.Count -gt 0) {
+                    Write-Info "  region summary: $($r.UnbackedExec.Count) private-exec, $($r.MappedExec.Count) mapped-exec"
                 }
             }
 
@@ -3063,6 +3512,74 @@ function Run-MemoryScan {
     Write-SectionResult "Process Memory"
     Write-SectionResult "Named Pipes"
     Write-SectionResult "Process Handles"
+}
+
+# Processes commonly used to host injected code. Structural checks only --
+# never string matching, for the reason documented above.
+$injectionHostNames = @("explorer","rundll32","notepad","dllhost","regsvr32","mshta","wscript","cscript")
+
+function Run-InjectionHostScan {
+    Write-Header "INJECTION HOST PROCESSES (structural)"
+    $procs = @(Get-Process -ErrorAction SilentlyContinue |
+               Where-Object { $injectionHostNames -contains $_.ProcessName })
+    if ($procs.Count -eq 0) {
+        Write-Skip "No injection-host processes running -- NOT CHECKED"
+        Mark-Skipped "Injection Hosts" "none of the monitored host processes were running"
+        Write-SectionResult "Injection Hosts"
+        return
+    }
+    $opened = 0; $n = 0
+    foreach ($proc in $procs) {
+        $ppath = try { $proc.MainModule.FileName } catch { "" }
+        # Only the real Windows binaries -- a fake "explorer.exe" elsewhere is
+        # caught by the renamed-binary and launch-chain sections instead.
+        if ($ppath -and $ppath -notlike "$env:SystemRoot*") {
+            Write-Amber "$($proc.ProcessName) PID $($proc.Id) is NOT running from Windows: $ppath"
+            Add-Finding -Section "Injection Hosts" -Type "HostOutsideWindows" -Detail $ppath `
+                -Value "PID:$($proc.Id)" -Severity "Review" `
+                -Evidence "a process using a Windows system-binary name from another directory"
+            $n++
+        }
+        $r = Scan-RobloxProcessMemory $proc.Id $proc.ProcessName $ppath
+        if ($r.Error) { continue }
+        $opened++
+
+        # Large RWX private memory in a host process is the injector's payload.
+        foreach ($ub in ($r.UnbackedExec | Where-Object { $_.SizeKB -gt 256 })) {
+            $rwx = $ub.Protection -eq "EXECUTE_READWRITE"
+            $sev = if ($rwx) { "Critical" } else { "Review" }
+            $txt = "$($proc.ProcessName) PID $($proc.Id): private executable region $($ub.Address) [$($ub.Protection)] $($ub.SizeKB)KB"
+            if ($sev -eq "Critical") { Write-Critical $txt } else { Write-Amber $txt }
+            Add-Finding -Section "Injection Hosts" -Type "HostUnbackedExec" -Detail "$($proc.ProcessName): $($ub.Address)" `
+                -Value "$($ub.SizeKB)KB $($ub.Protection)" -Severity $sev `
+                -Evidence "anonymous executable memory in a host process; RWX in particular has few legitimate uses outside JIT engines"
+            $n++
+        }
+        foreach ($mp in ($r.MappedExec | Where-Object { $_.SizeKB -gt 128 })) {
+            Write-Amber "$($proc.ProcessName) PID $($proc.Id): MAPPED executable region $($mp.Address) [$($mp.Protection)] $($mp.SizeKB)KB"
+            Add-Finding -Section "Injection Hosts" -Type "HostMappedExec" -Detail "$($proc.ProcessName): $($mp.Address)" `
+                -Value "$($mp.SizeKB)KB $($mp.Protection)" -Severity "Review" `
+                -Evidence "section-mapped executable memory -- the technique used specifically to evade PRIVATE-only memory scanners"
+            $n++
+        }
+        foreach ($t in (Get-SuspiciousThreads $proc.Id)) {
+            Write-Critical "$($proc.ProcessName) PID $($proc.Id): thread TID $($t.ThreadID) starts in private executable memory @ $($t.StartAddr)"
+            $threadFindings.Add([PSCustomObject]@{ PID=$proc.Id; Name=$proc.ProcessName; ThreadID=$t.ThreadID; StartAddr=$t.StartAddr; Protection=$t.Protection }) | Out-Null
+            Add-Finding -Section "Injection Hosts" -Type "HostSuspThread" -Detail "$($proc.ProcessName) TID:$($t.ThreadID)" `
+                -Value $t.StartAddr -Severity "Critical" -Tier "A" `
+                -Evidence "$($t.Protection), $($t.RegionKB)KB -- a thread whose entry point is not inside any loaded module"
+            Add-Timeline "Shellcode-style thread in $($proc.ProcessName) TID $($t.ThreadID)"
+            $n++
+        }
+    }
+    if ($opened -eq 0) {
+        Mark-Skipped "Injection Hosts" "OpenProcess failed on every host process"
+        Write-Warn "No host process could be opened -- this is NOT a clean result"
+    } else {
+        Mark-Ran "Injection Hosts" "$opened of $($procs.Count) host process(es) examined (structural only, no string matching)"
+        if ($n -eq 0) { Write-OK "No unbacked executable memory or anomalous threads in host processes" }
+    }
+    Write-SectionResult "Injection Hosts"
 }
 
 # =====================================================
@@ -3260,81 +3777,6 @@ function Run-LaunchChainScan {
         Write-Host ""
     }
     Write-SectionResult "Launch Chain"
-}
-
-# =====================================================
-# ROBLOX LOG SCAN
-# =====================================================
-function Scan-RobloxLogs {
-    Write-Header "ROBLOX LOG FILES"
-    $logRoots = @("$env:LOCALAPPDATA\Roblox\logs")
-    foreach ($l in $knownThirdPartyLaunchers) { $logRoots += "$env:LOCALAPPDATA\$l\Logs" }
-    $logFiles = [System.Collections.Generic.List[object]]::new()
-    foreach ($lr in $logRoots) {
-        if (-not (Test-Path $lr)) { continue }
-        Get-ChildItem $lr -File -Filter "*.log" -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $script:ScanDaysBack -ge 9999 -or $_.LastWriteTime -ge $script:ScanCutoff } |
-            ForEach-Object { $logFiles.Add($_) | Out-Null }
-    }
-    if ($logFiles.Count -eq 0) {
-        Write-Skip "No Roblox log files in range -- NOT CHECKED"
-        Mark-Skipped "Roblox Logs" "no log files found within the selected time range"
-        Write-SectionResult "Roblox Logs"
-        return
-    }
-
-    $logFiles = @($logFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 100)
-    Mark-Ran "Roblox Logs" "$($logFiles.Count) log file(s)"
-    Write-Info "Log files: $($logFiles.Count)"
-    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
-    $n = 0
-    foreach ($log in $logFiles) {
-        try {
-            $lineNum = 0
-            foreach ($line in [System.IO.File]::ReadLines($log.FullName)) {
-                $lineNum++
-                $ll = $line.ToLower()
-                $hi = $null
-                foreach ($mk in $robloxLogMarkersHigh) { if ($ll.Contains($mk)) { $hi = $mk; break } }
-                if ($hi) {
-                    $key = "$($log.Name)|H|$hi"
-                    if ($seen.Add($key)) {
-                        $snip = $line.Trim(); if ($snip.Length -gt 160) { $snip = $snip.Substring(0,160) + "..." }
-                        Write-Hit "Log [$($log.Name):$lineNum] executor API '$hi'"
-                        Add-Finding -Section "Roblox Logs" -Type "LogMarkerHigh" -Detail "$($log.Name):$lineNum" `
-                            -Value $hi -Severity "Critical" -Tier "A" -Evidence $snip
-                        Add-Timeline "Roblox log executor marker '$hi'"
-                        $n++
-                    }
-                    continue
-                }
-                $noise = $null
-                foreach ($mk in $robloxLogMarkersNoise) { if ($ll.Contains($mk)) { $noise = $mk; break } }
-                if ($noise) {
-                    $key = "$($log.Name)|N|$noise"
-                    if ($seen.Add($key)) {
-                        # These appear in ordinary client stack traces. Context only.
-                        Add-Finding -Section "Roblox Logs" -Type "LogMarkerNoise" -Detail "$($log.Name):$lineNum" `
-                            -Value $noise -Severity "Context" -Evidence "also appears in ordinary client script errors"
-                    }
-                    continue
-                }
-                $m = Test-CheatMatch $line
-                if ($m -and $m.Tier -eq "A") {
-                    $key = "$($log.Name)|T|$($m.Term)"
-                    if ($seen.Add($key)) {
-                        $snip = $line.Trim(); if ($snip.Length -gt 160) { $snip = $snip.Substring(0,160) + "..." }
-                        Write-Hit "Log [$($log.Name):$lineNum] cheat term '$($m.Term)'"
-                        Add-Finding -Section "Roblox Logs" -Type "LogCheatTerm" -Detail "$($log.Name):$lineNum" `
-                            -Value $m.Term -Severity "Critical" -Tier "A" -Evidence $snip
-                        $n++
-                    }
-                }
-            }
-        } catch { continue }
-    }
-    if ($n -eq 0) { Write-OK "Roblox logs: nothing" }
-    Write-SectionResult "Roblox Logs"
 }
 
 # =====================================================
@@ -3986,7 +4428,11 @@ function Generate-Report($verdict, $scannerHash) {
     $context = @($findings | Where-Object { $_.Severity -in @("Context","Info") })
 
     $findRows = ""
-    foreach ($f in ($scored | Sort-Object @{E={ switch ($_.Severity) { "Critical" {0} "Review" {1} default {2} } }}, Section)) {
+    $reportOrder = $scored | Sort-Object `
+        @{E={ switch ($_.Tier) { "A" {0} "B" {1} "C" {2} default {3} } }}, `
+        @{E={ switch ($_.Severity) { "Critical" {0} "Review" {1} default {2} } }}, `
+        @{E={ [string]$_.Section }}, @{E={ [string]$_.Type }}, @{E={ [string]$_.Detail }}
+    foreach ($f in $reportOrder) {
         $tier = if ($f.Tier) { " <span class='tier'>Tier $($f.Tier)</span>" } else { "" }
         $findRows += "<tr class='$(SevClass $f.Severity)'><td>$($f.Severity)$tier</td><td>$(HtmlEnc $f.Section)</td><td>$(HtmlEnc $f.Type)</td><td>$(HtmlEnc $f.Detail)</td><td>$(HtmlEnc $f.Value)</td><td class='ev'>$(HtmlEnc $f.Evidence)</td></tr>`n"
     }
@@ -4016,7 +4462,7 @@ function Generate-Report($verdict, $scannerHash) {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Roblox Cheat Scanner v4.7 -- $env:COMPUTERNAME</title>
+<title>Roblox Cheat Scanner v5.0 -- $env:COMPUTERNAME</title>
 <style>
   :root{--bg:#0a0a0f;--bg3:#161b27;--accent:#00d4ff;--red:#ff3d3d;--amber:#ffd700;--green:#00ff88;--grey:#7a8190;--text:#e8e8e8;--muted:#666;--border:#1e2435}
   *{box-sizing:border-box;margin:0;padding:0}
@@ -4050,7 +4496,7 @@ function Generate-Report($verdict, $scannerHash) {
 </style>
 </head>
 <body>
-<h1>ROBLOX CHEAT SCANNER v4.7 -- PROPERTY OF JD</h1>
+<h1>ROBLOX CHEAT SCANNER v5.0 -- PROPERTY OF JD</h1>
 
 <div class="verdict $verdictClass">
   <div class="big">$(HtmlEnc $verdict.Line)</div>
@@ -4068,12 +4514,17 @@ function Generate-Report($verdict, $scannerHash) {
 <div class="meta">
   <div class="card"><div class="label">Computer</div><div class="value">$(HtmlEnc $env:COMPUTERNAME)</div></div>
   <div class="card"><div class="label">User</div><div class="value">$(HtmlEnc $env:USERNAME)</div></div>
-  <div class="card"><div class="label">Local time</div><div class="value">$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') (UTC$tzOffset)</div></div>
+  <div class="card"><div class="label">Local time</div><div class="value">$(HtmlEnc (Format-Stamp (Get-Date))) (UTC$tzOffset)</div></div>
   <div class="card"><div class="label">UTC time</div><div class="value">$($startTimeUtc.ToString('yyyy-MM-dd HH:mm:ss'))</div></div>
   <div class="card"><div class="label">Duration</div><div class="value">${dur}s</div></div>
   <div class="card"><div class="label">Time range</div><div class="value">$(if ($script:ScanDaysBack -ge 9999) { 'all time' } else { "last $($script:ScanDaysBack) day(s)" })</div></div>
   <div class="card"><div class="label">Volume serial</div><div class="value">$(HtmlEnc $script:VolumeSerial)</div></div>
   <div class="card"><div class="label">Scanner build</div><div class="value">$(HtmlEnc $scannerHash)</div></div>
+  <div class="card"><div class="label">Windows</div><div class="value">$(HtmlEnc $script:OsCaption)</div></div>
+  <div class="card"><div class="label">Installed</div><div class="value">$(HtmlEnc $script:InstallDate) $(HtmlEnc $script:InstallAge)</div></div>
+  <div class="card"><div class="label">Last boot</div><div class="value">$(HtmlEnc $script:BootTime) (up $(HtmlEnc $script:UptimeStr))</div></div>
+  <div class="card"><div class="label">Activation</div><div class="value">$(HtmlEnc $script:ActivationState)</div></div>
+  <div class="card"><div class="label">Shadow copies</div><div class="value">$(HtmlEnc $script:ShadowCount)</div></div>
 </div>
 
 <h2>Section status</h2>
@@ -4122,7 +4573,7 @@ function Generate-Report($verdict, $scannerHash) {
 </details>
 
 <footer>
-Roblox Cheat Scanner v4.7 | $(HtmlEnc $env:COMPUTERNAME) | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') local / $($startTimeUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC<br>
+Roblox Cheat Scanner v5.0 | $(HtmlEnc $env:COMPUTERNAME) | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') local / $($startTimeUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC<br>
 This report is plain HTML and is NOT tamper-evident. It can be edited by anyone
 with access to the machine. Verify the report hash out of band before relying
 on it in any decision.<br>
@@ -4250,6 +4701,20 @@ function Show-OverviewGui($verdict) {
     # --- Status
     $tp = New-Tab "Status"
     $lv = New-DarkListView @(("Section",240),("Status",120),("Note",760))
+    foreach ($env in @(
+        @("Windows",       $script:OsCaption),
+        @("Installed",     "$script:InstallDate $script:InstallAge"),
+        @("Last boot",     "$script:BootTime (up $script:UptimeStr)"),
+        @("Activation",    $script:ActivationState),
+        @("Shadow copies", [string]$script:ShadowCount),
+        @("Timezone",      "$script:TzAbbr (UTC$tzOffset)")
+    )) {
+        $it = New-Object System.Windows.Forms.ListViewItem([string]$env[0])
+        [void]$it.SubItems.Add("info")
+        [void]$it.SubItems.Add([string]$env[1])
+        Set-RowSeverity $it "Context"
+        [void]$lv.Items.Add($it)
+    }
     foreach ($s in $script:Sections.Values) {
         $state = Get-SectionState $s
         $it = New-Object System.Windows.Forms.ListViewItem([string]$s.Name)
@@ -4272,7 +4737,8 @@ function Show-OverviewGui($verdict) {
     $tp = New-Tab "Findings ($($scored.Count))"
     $lv = New-DarkListView @(("Severity",90),("Tier",50),("Section",180),("Type",180),("Detail",520),("Evidence",380))
     if ($scored.Count -eq 0) { Add-EmptyRow $lv "No scored findings" }
-    foreach ($f in ($scored | Sort-Object @{E={ if ($_.Severity -eq 'Critical') {0} else {1} }})) {
+    $tierOrder = @{E={ switch ($_.Tier) { "A" {0} "B" {1} "C" {2} default {3} } }}
+    foreach ($f in ($scored | Sort-Object $tierOrder, Section, Type, Detail)) {
         $it = New-Object System.Windows.Forms.ListViewItem([string]$f.Severity)
         [void]$it.SubItems.Add([string]$f.Tier)
         [void]$it.SubItems.Add([string]$f.Section)
@@ -4327,19 +4793,22 @@ function Show-OverviewGui($verdict) {
     foreach ($h in $hollowFindings)        { $it = New-Object System.Windows.Forms.ListViewItem("Hollow");  [void]$it.SubItems.Add("$($h.Name) PID $($h.PID)"); [void]$it.SubItems.Add([string]$h.Path); [void]$it.SubItems.Add([string]$h.Note); Set-RowSeverity $it "Critical"; [void]$lv.Items.Add($it) }
     foreach ($h in $handleFindings)        { $it = New-Object System.Windows.Forms.ListViewItem("Handle");  [void]$it.SubItems.Add("$($h.OwnerName) PID $($h.OwnerPID)"); [void]$it.SubItems.Add([string]$h.Access); [void]$it.SubItems.Add([string]$h.OwnerPath); Set-RowSeverity $it $(if ($h.CheatMatch -or $h.VMWrite) { "Critical" } else { "Review" }); [void]$lv.Items.Add($it) }
     foreach ($p in $pipeFindings)          { $it = New-Object System.Windows.Forms.ListViewItem("Pipe");    [void]$it.SubItems.Add([string]$p.PipeName); [void]$it.SubItems.Add([string]$p.Match); [void]$it.SubItems.Add([string]$p.Tier); Set-RowSeverity $it $(if ($p.Tier -eq "A") { "Critical" } else { "Review" }); [void]$lv.Items.Add($it) }
+    foreach ($m in $moduleFindings)        { $it = New-Object System.Windows.Forms.ListViewItem("Module");  [void]$it.SubItems.Add("$($m.Process) PID $($m.PID)"); [void]$it.SubItems.Add([string]$m.Module); [void]$it.SubItems.Add([string]$m.Signer); Set-RowSeverity $it $m.Severity; [void]$lv.Items.Add($it) }
     foreach ($m in $suspiciousMemFindings) { $it = New-Object System.Windows.Forms.ListViewItem("Chat str"); [void]$it.SubItems.Add([string]$m.String); [void]$it.SubItems.Add([string]$m.Address); [void]$it.SubItems.Add("context only"); Set-RowSeverity $it "Context"; [void]$lv.Items.Add($it) }
     $det = New-DetailPane; Wire-Detail $lv $det
     $tp.Controls.Add($lv); $tp.Controls.Add($det); [void]$tab.TabPages.Add($tp)
 
     # --- Prefetch
     $tp = New-Tab "Prefetch ($($prefetchViewerData.Count))"
-    $lv = New-DarkListView @(("Exe",240),("Last run",170),("Runs",60),("Parsed",70),("Tier",50),("Match",140),("All run times",520))
-    foreach ($r in ($prefetchViewerData | Sort-Object LastRun -Descending)) {
+    $lv = New-DarkListView @(("Exe",240),("Last run",230),("Runs",60),("Parsed",70),("Tier",50),("Match",140),("All run times",640))
+    $pfSorted = $prefetchViewerData |
+        Sort-Object @{E={[int]$_.RunCount}; Descending=$true}, @{E={$_.LastRun}; Descending=$true}
+    foreach ($r in $pfSorted) {
         $it = New-Object System.Windows.Forms.ListViewItem([string]$r.Exe)
-        [void]$it.SubItems.Add([string]$r.LastRun); [void]$it.SubItems.Add([string]$r.RunCount)
+        [void]$it.SubItems.Add((Format-ViewTime $r.LastRun)); [void]$it.SubItems.Add([string]$r.RunCount)
         [void]$it.SubItems.Add($(if ($r.Parsed) { "yes" } else { "NO" }))
         [void]$it.SubItems.Add([string]$r.Tier); [void]$it.SubItems.Add([string]$r.Match)
-        [void]$it.SubItems.Add([string]$r.AllRunTimes)
+        [void]$it.SubItems.Add((Format-ViewTimeList $r.AllRunTimes))
         $sev = if ($r.Tier -eq "A") { "Critical" } elseif ($r.Tier -eq "B") { "Review" } elseif ($r.Match) { "Context" } else { "Clear" }
         Set-RowSeverity $it $sev
         [void]$lv.Items.Add($it)
@@ -4349,9 +4818,9 @@ function Show-OverviewGui($verdict) {
 
     # --- BAM
     $tp = New-Tab "BAM ($($bamViewerData.Count))"
-    $lv = New-DarkListView @(("Last run",170),("Path",700),("Tier",50),("Match",160))
-    foreach ($r in ($bamViewerData | Sort-Object LastRun -Descending)) {
-        $it = New-Object System.Windows.Forms.ListViewItem([string]$r.LastRun)
+    $lv = New-DarkListView @(("Last run",230),("Path",700),("Tier",50),("Match",160))
+    foreach ($r in ($bamViewerData | Sort-Object @{E={ switch ($_.Tier) { "A" {0} "B" {1} default {2} } }}, @{E={$_.LastRun}; Descending=$true})) {
+        $it = New-Object System.Windows.Forms.ListViewItem((Format-ViewTime $r.LastRun))
         [void]$it.SubItems.Add([string]$r.Path); [void]$it.SubItems.Add([string]$r.Tier); [void]$it.SubItems.Add([string]$r.Match)
         Set-RowSeverity $it $(if ($r.Tier -eq "A") { "Critical" } elseif ($r.Tier -eq "B") { "Review" } else { "Clear" })
         [void]$lv.Items.Add($it)
@@ -4397,6 +4866,13 @@ Select-TimeRange
 
 $scannerHash = if ($PSCommandPath) { Get-FileSha256 $PSCommandPath }
                else { "UNAVAILABLE -- script was pasted into the console, not run from a file" }
+$script:OsCaption       = "unknown"
+$script:BootTime        = "unknown"
+$script:UptimeStr       = "unknown"
+$script:InstallDate     = "unknown"
+$script:InstallAge      = ""
+$script:ActivationState = "unknown"
+$script:ShadowCount     = 0
 $script:VolumeSerial = ""
 try { $script:VolumeSerial = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop).VolumeSerialNumber } catch {}
 
@@ -4450,6 +4926,7 @@ Pause-Step "  Press ENTER to begin the scan"
 Run-Section1
 Run-Section2
 Run-Section3
+Run-BAMParser
 Run-Section4
 Run-Section5
 Run-Section6
@@ -4457,9 +4934,9 @@ Run-Section7
 Run-RobloxClientIntegrity
 Run-ModuleScan
 Run-MemoryScan
+Run-InjectionHostScan
 Run-KernelDriverScan
 Run-LaunchChainScan
-Scan-RobloxLogs
 Run-ProvenanceScan
 Run-RenamedBinaryScan
 Run-PANScan
