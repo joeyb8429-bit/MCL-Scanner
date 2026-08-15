@@ -1,6 +1,140 @@
 # =====================================================
-# ROBLOX CHEAT SCANNER v5.0
+# ROBLOX CHEAT SCANNER v5.8
 # PROPERTY OF JD
+#
+# v5.8 -- CAPTURE TABLE LISTS EVERYTHING
+#   * The Hidden-from-screen-capture table now names every process, always.
+#     Name resolution goes through four routes (Get-Process, WMI, the resolved
+#     image path, then the PID itself) so a row is never blank and never
+#     dropped. A window whose owner cannot be identified is MORE interesting
+#     than one that can, so it stays in the table with the gaps labelled.
+#   * Empty title, empty class, missing signer and unreachable path each print
+#     what is missing in place, rather than rendering as an empty cell that
+#     reads like "nothing there".
+#   * When the section did not run at all the table says NOT CHECKED with the
+#     reason, instead of "no windows are excluded".
+#
+# v5.8 -- THIRD-PARTY ANTIVIRUS
+#   * FIXED (false positive on every Norton/McAfee/Bitdefender machine):
+#     Windows puts Defender into PASSIVE mode when another antivirus registers.
+#     Get-MpComputerStatus then reports AntivirusEnabled = False, and v5.6
+#     raised "Defender antivirus: DISABLED" as a finding. It now identifies the
+#     active product first and records passive Defender as context. A genuine
+#     "no protection at all" case is still flagged.
+#   * NEW: Security Products section. Enumerates every AV, antispyware and
+#     firewall product registered with Windows Security Center
+#     (root\SecurityCenter2), decodes productState into on/off plus definition
+#     freshness, and prints the raw hex so a reviewer can verify it by hand.
+#     No product registered at all is CRITICAL.
+#   * NEW: honest coverage reporting. A third-party product's detection history
+#     cannot be read -- no common API, proprietary formats per vendor. The
+#     Defender threat-history check is now reported as NOT APPLICABLE on those
+#     machines rather than returning empty and reading as clean.
+#
+# v5.8 -- REPORT REBUILT AROUND REVIEWER QUESTIONS
+#   * HTML report regrouped into seven categories named after the question a
+#     reviewer is asking, not after how the scanner is built. Groups with
+#     findings open automatically; quiet groups collapse to one line. Empty
+#     tables no longer render at all.
+#   * "Hidden from screen capture" is now its own top-level category AND its
+#     own tab, listing EVERY capture-excluded window including trusted ones,
+#     with a live filter, an untrusted-only toggle and a mismatch-only toggle.
+#   * NEW: name/signer mismatch rule. An unsigned binary called
+#     RobloxPlayerBeta.exe still reads NotSigned; system binary names running
+#     from outside System32 are flagged the same way.
+#   * File paths are their own clickable field after a pipe separator: click to
+#     copy, or open the containing folder. Resolved through three routes
+#     (Get-Process, WMI, QueryFullProcessImageName) and reported as
+#     "could not reach" when all three fail, never as a blank cell.
+#   * NEW: browser history clearing. Chromium records
+#     browser.last_clear_browsing_data_time in Preferences and it survives the
+#     clear itself. Firefox has no equivalent, so profile creation is reported
+#     as context instead.
+#   * Report themes: purple (default), green, blue. Severity colours are fixed
+#     across all three -- red and amber are the only colours carrying meaning.
+#
+# v5.8 -- DEFENDER DETECTIONS NOW NAME THE FILE
+#   v5.4 printed the threat name and a raw status number and threw the path
+#   away, so a reviewer could not tell WHICH file Defender hit. Each detection
+#   now resolves and prints:
+#       file    - the path, with \Device\HarddiskVolumeN mapped to a drive letter
+#       [STILL ON DISK] - checked live; forces CRITICAL regardless of status
+#       sha256  - hashed if present, so it can go straight into -HashList
+#       inside  - the archive it was extracted from
+#       from    - the URL it was downloaded from (webfile resources)
+#       ran as  - PID, if it executed
+#       cmd     - the command line, for behavioural detections
+#   Status IDs are resolved to names (3 = Quarantined, 103 = REMOVE FAILED,
+#   5 = Allowed by user, ...) instead of bare numbers, and the scan ends with a
+#   summary of every detected file still present.
+#
+# v5.8 -- FIXES FROM THE FIRST v5.3 RUN
+#   * FIXED (silent, total): the PE import parser failed on EVERY 64-bit
+#     binary. [uint64]0x8000000000000000 parses as Int64 in PowerShell 5.1,
+#     overflows negative, and the cast threw inside a catch. Every call
+#     returned Ok=$false, so "PE Signatures: 0 parsed" was reported as a clean
+#     pass and CAPTURE-PE-01 / EXTMEM-PE-01 never ran once. Parse failures are
+#     now counted and reported as NOT CHECKED instead of silence.
+#   * FIXED: the scanner flagged ITSELF as a renamed cheat binary. The exe
+#     embeds this script, which contains the cheat term list, so it matched
+#     "synapse" inside its own dictionary. Self-marker detection now excludes
+#     the tool from the renamed-binary, PE and config scans.
+#   * FIXED: ANTENNA-CFG-01 fired on a saved text file containing ordinary
+#     Roblox words. Markers are now split STRONG (engine-internal offset names)
+#     vs WEAK (common vocabulary); weak names alone can no longer fire.
+#   * REMOVED two dead section registrations left over from the v5.1 rename
+#     that reported NOT CHECKED with a blank reason.
+#
+# v5.8 -- PE BEHAVIOUR SIGNATURES
+#   Built from a confirmed sample. The import-hash implementation here was
+#   verified to reproduce the standard pefile imphash exactly.
+#
+#     PE-IMPHASH-01  import hash on the blocklist. Survives renaming and
+#                    cosmetic recompiles -- only changing which APIs the
+#                    program calls changes it.
+#     CAPTURE-PE-01  binary imports SetWindowDisplayAffinity. Fires from disk
+#                    even when the cheat is CLOSED, so shutting it down before
+#                    a scan no longer hides it. This is the single most
+#                    important rule for a league that verifies by screenshare.
+#     EXTMEM-PE-01   external read-only cheat profile: reads another process's
+#                    memory + walks its modules + synthesises input + draws a
+#                    layered/D3D overlay, but NEVER writes or injects. Invisible
+#                    to module-enumeration and injection checks by design.
+#     EXTMEM-PE-02   reads AND writes process memory (trainer/debugger) - REVIEW
+#     DRIVER-PE-01   unsigned binary with DeviceIoControl + process access
+#     ANTENNA-CFG-02 settings file matched on ESP/aimbot feature keys
+#
+#   ANTENNA-CFG-01 offset markers replaced with field names taken from a
+#   confirmed sample, so an offset dump is identified by CONTENT -- the cheat's
+#   own instructions tell users to rename the file to anything.
+#
+#   -HashList now accepts imphashes (32 hex chars) alongside SHA256 (64).
+#
+# v5.8 -- NAMED SIGNATURES
+#   Every rule now carries an ID, so a disputed finding can be looked up and
+#   argued with by hand instead of resting on "the scanner said suspicious".
+#     ANTENNA-REG-01/02  cheat config key under HKCU + its offsets_path value
+#     ANTENNA-CFG-01     Roblox offset dump matched by CONTENT, not filename
+#     ANTENNA-NET-01     offset-distribution host in the DNS cache
+#     OVERLAY-WIN-01     topmost + layered + click-through window, untrusted owner
+#     OVERLAY-WIN-02     ImGui/overlay window class
+#     EXTMEM-PROC-01     unsigned process holding a READ-ONLY handle to Roblox
+#
+# v5.8 -- ANTI-SCREENSHARE COUNTERMEASURES
+#   * NEW: screen-capture evasion scan. Enumerates every top-level window and
+#     checks GetWindowDisplayAffinity. A window set to WDA_EXCLUDEFROMCAPTURE
+#     is drawn on the monitor but omitted from OBS, Discord, screenshots and
+#     remote desktop. Cheat overlays ship this as "streamproof" -- it is the
+#     mechanism that defeats screenshare verification, and it was previously
+#     invisible to every check in this tool. Trusted publishers (DRM players,
+#     password managers) are context; unsigned owners are CRITICAL.
+#   * NEW: cheat config + registry artifact scan. Overlay cheats keep settings
+#     outside the binary so the exe can be renamed or re-downloaded. Those
+#     artifacts survive deleting the exe and users rarely remove them:
+#       - HKCU root keys named after known cheats (values printed)
+#       - offsets.json / *_cfg.jsonc / autoload.cfg by name
+#       - a "logs" folder sitting beside an unsigned executable
+#   * Added "antenna" (Tier A) and offsets.imtheo.lol to the term/domain lists.
 #
 # v5.0
 #   FIXED (real bug, visible in the v4.9 run as "BAM (0)"):
@@ -31,7 +165,7 @@
 #     per-entry detail stays in the Delta tab.
 #   * Status tab opens with the machine environment block.
 #
-# v5.0 -- FINAL
+# v5.8 -- FINAL
 #   REMOVED:
 #   * Roblox log file scanning. The markers it looked for appear in ordinary
 #     client script errors, and the section produced no true positives across
@@ -50,7 +184,7 @@
 #   * Event 104 (System log cleared). Previously only 1102 (Security) was read.
 #   * Windows build, activation state and shadow copy count in the report header.
 #
-# v5.0 -- MEMORY SUBSYSTEM
+# v5.8 -- MEMORY SUBSYSTEM
 #   * NEW: MEM_MAPPED executable regions are now detected. v4.5-v4.7 examined
 #     PRIVATE memory only, so section-mapped injection (NtCreateSection +
 #     NtMapViewOfSection) was structurally invisible -- and that technique is
@@ -363,6 +497,125 @@ public class Win32Handle {
 "@ -ErrorAction SilentlyContinue
 }
 
+if (-not ([Management.Automation.PSTypeName]'Win32Dev').Type) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class Win32Dev {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern uint QueryDosDeviceW(string lpDeviceName, StringBuilder lpTargetPath, uint ucchMax);
+}
+"@ -ErrorAction SilentlyContinue
+}
+
+# ---- NEW (v5.1): window display-affinity enumeration.
+# SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) makes a window
+# invisible to screen capture, recording and screenshare while still being
+# drawn on the physical monitor. Cheat overlays advertise this as
+# "streamproof". It is the direct counter to a recorded moderation check, and
+# nothing else in this scanner could see it.
+if (-not ([Management.Automation.PSTypeName]'Win32Capture').Type) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public class Win32Capture {
+    public const uint WDA_NONE                = 0x00;
+    public const uint WDA_MONITOR             = 0x01;
+    public const uint WDA_EXCLUDEFROMCAPTURE  = 0x11;
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowDisplayAffinity(IntPtr hWnd, out uint dwAffinity);
+    [DllImport("user32.dll")]
+    public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    [DllImport("user32.dll")]
+    public static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    public class WinInfo {
+        public IntPtr Handle; public string Title; public string ClassName;
+        public uint Pid; public uint Affinity; public bool Visible;
+    }
+
+    public static List<WinInfo> GetHiddenFromCapture() {
+        var hits = new List<WinInfo>();
+        EnumWindows(delegate(IntPtr h, IntPtr l) {
+            uint aff;
+            if (GetWindowDisplayAffinity(h, out aff) && aff != WDA_NONE) {
+                var t = new StringBuilder(512); GetWindowTextW(h, t, 512);
+                var c = new StringBuilder(256); GetClassNameW(h, c, 256);
+                uint pid; GetWindowThreadProcessId(h, out pid);
+                hits.Add(new WinInfo {
+                    Handle = h, Title = t.ToString(), ClassName = c.ToString(),
+                    Pid = pid, Affinity = aff, Visible = IsWindowVisible(h)
+                });
+            }
+            return true;
+        }, IntPtr.Zero);
+        return hits;
+    }
+}
+"@ -ErrorAction SilentlyContinue
+}
+
+if (-not ([Management.Automation.PSTypeName]'Win32Dev').Type) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class Win32Dev {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern uint QueryDosDeviceW(string lpDeviceName, StringBuilder lpTargetPath, uint ucchMax);
+}
+"@ -ErrorAction SilentlyContinue
+}
+
+# ---- NEW (v5.1): window display-affinity enumeration.
+# SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) makes a window invisible to
+# screen capture and recording while remaining visible on the physical screen.
+# Cheat overlays advertise this as "streamproof". It is the direct counter to a
+# league that verifies by screenshare, and almost nothing legitimate uses it.
+if (-not ([Management.Automation.PSTypeName]'Win32Wnd').Type) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class Win32Wnd {
+    public const uint WDA_NONE                = 0x00000000;
+    public const uint WDA_MONITOR             = 0x00000001;
+    public const uint WDA_EXCLUDEFROMCAPTURE  = 0x00000011;
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowDisplayAffinity(IntPtr hWnd, out uint dwAffinity);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindowLongPtrW(IntPtr hWnd, int nIndex);
+}
+"@ -ErrorAction SilentlyContinue
+}
+
 # ---- NEW (v4.5): MAM (XPRESS_HUFF) decompression for Windows 10/11 prefetch.
 # Without this, prefetch run counts and per-run timestamps never parse.
 if (-not ([Management.Automation.PSTypeName]'PfDecomp').Type) {
@@ -500,7 +753,8 @@ $suspiciousDomains = @(
     "scriptware.io","hydroxide.io","wave.cx",
     "arceus-x.net","evon.to","krnl.ca",
     "hydrogen.to","seliware.com","vortex-hub.net",
-    "cryptware.io","zorara.gg"
+    "cryptware.io","zorara.gg",
+    "offsets.imtheo.lol","imtheo.lol"
 )
 
 # Memory strings. Split into HIGH (cheat-only) and CHAT (could be typed by a
@@ -773,16 +1027,67 @@ if ($allUserProfiles.Count -eq 0) { $allUserProfiles += $env:USERPROFILE }
 # ---- NEW (v4.5): optional SHA256 blocklist. Names are the attacker's free
 # ---- variable; hashes are not. One hash per line, '#' for comments.
 $script:HashBlocklist = @{}
+$script:ImphashBlocklist = @{}
 if ($HashList -and (Test-Path $HashList)) {
     foreach ($line in (Get-Content $HashList -ErrorAction SilentlyContinue)) {
         $l = $line.Trim()
         if (-not $l -or $l.StartsWith("#")) { continue }
         $parts = $l -split '\s+', 2
         $h = $parts[0].ToUpper()
-        if ($h -match '^[0-9A-F]{64}$') {
-            $script:HashBlocklist[$h] = if ($parts.Count -gt 1) { $parts[1] } else { "(unnamed)" }
-        }
+        $label = if ($parts.Count -gt 1) { $parts[1] } else { "(unnamed)" }
+        if ($h -match '^[0-9A-F]{64}$') { $script:HashBlocklist[$h] = $label }
+        elseif ($h -match '^[0-9A-F]{32}$') { $script:ImphashBlocklist[$h.ToLower()] = $label }
     }
+}
+
+# =====================================================
+# REPORT CATEGORIES  (v5.6)
+# Sections are named after how the scanner works. A reviewer is asking a
+# handful of questions instead. The report groups by the question; the section
+# name stays visible on every finding so the mapping is never hidden.
+# =====================================================
+$script:CategoryMap = [ordered]@{
+    "Did they run a cheat?" =
+        @("Execution Artifacts","Event Log Evidence","Launch Chain","Crash Artifacts")
+    "Hidden from screen capture" =
+        @("Capture Evasion")
+    "Is something running now?" =
+        @("Process Memory","Loaded Modules","Process Handles","Named Pipes","Injection Hosts")
+    "Is a cheat on this disk?" =
+        @("Renamed Binaries","PE Signatures","Hash Blocklist","Cheat Configs","Signatures",
+          "Entropy","Roblox Client Integrity")
+    "Did they clean up?" =
+        @("Deleted Files","Snapshot Delta","Presence Artifacts","Browser History")
+    "Can this machine be trusted?" =
+        @("Security Products","System Protection","Persistence","Kernel Drivers","Network & DNS","PowerShell History")
+    "Where did it come from?" =
+        @("Download Provenance","Browser Downloads")
+}
+$script:CategoryIcon = @{
+    "Did they run a cheat?"        = "&#9654;"
+    "Hidden from screen capture"   = "&#9673;"
+    "Is something running now?"    = "&#9679;"
+    "Is a cheat on this disk?"     = "&#9670;"
+    "Did they clean up?"           = "&#9632;"
+    "Can this machine be trusted?" = "&#9650;"
+    "Where did it come from?"      = "&#9660;"
+}
+
+# Every capture-excluded window, trusted ones included. A moderator who has
+# never seen the legitimate case cannot judge the illegitimate one.
+$captureWindows = [System.Collections.Generic.List[object]]::new()
+$browserHistoryEvents = [System.Collections.Generic.List[object]]::new()
+
+# Pull a Windows path out of a finding so the report can render it as its own
+# clickable field instead of burying it in a sentence.
+function Get-FindingPath($detail, $evidence) {
+    foreach ($src in @($detail, $evidence)) {
+        if (-not $src) { continue }
+        $m = [regex]::Match([string]$src, '[A-Za-z]:\\[^"|<>*?\r\n]+?\.[A-Za-z0-9]{1,6}(?=$|[\s"|,;)])')
+        if (-not $m.Success) { $m = [regex]::Match([string]$src, '[A-Za-z]:\\[^"|<>*?\r\n]{3,}') }
+        if ($m.Success) { return $m.Value.TrimEnd('.', ' ', ',', ';', ')') }
+    }
+    return $null
 }
 
 # =====================================================
@@ -817,6 +1122,7 @@ foreach ($s in @(
     "Kernel Drivers","Launch Chain",
     "Download Provenance","Crash Artifacts","Hash Blocklist",
     "Renamed Binaries","Deleted Files","Browser Downloads","Injection Hosts",
+    "Capture Evasion","Cheat Configs","Signatures","PE Signatures","Browser History","Security Products",
     "Entropy","Snapshot Delta"
 )) { Register-Section $s }
 
@@ -1379,7 +1685,7 @@ function Write-Banner {
     Clear-Host
     Write-Host ""
     Write-Host "  +=================================================+" -ForegroundColor Cyan
-    Write-Host "  |   ROBLOX CHEAT SCANNER v5.0                    |" -ForegroundColor Cyan
+    Write-Host "  |   ROBLOX CHEAT SCANNER v5.8                    |" -ForegroundColor Cyan
     Write-Host "  |   PROPERTY OF JD                               |" -ForegroundColor DarkGray
     Write-Host "  +=================================================+" -ForegroundColor Cyan
     Write-Host ""
@@ -1790,6 +2096,219 @@ function Test-MaintenanceDeletion($deletedList) {
 }
 
 # =====================================================
+# DEFENDER THREAT RESOURCE PARSING  (v5.5)
+#
+# Get-MpThreatDetection returns a Resources array of tagged strings:
+#   file:_C:\path\to\thing.exe
+#   webfile:_C:\path\to\thing.exe|https://source/url|referrer
+#   containerfile:_C:\path\to\archive.zip
+#   process:_pid:16932,ProcessStart:133...
+#   CmdLine:_C:\Windows\System32\cmd.exe /c ...
+#   amsi:_\Device\HarddiskVolume3\...\powershell.exe
+#
+# v5.4 printed only the threat name and a raw status number, so a reviewer had
+# no idea WHICH file Defender hit. The path is the single most useful field in
+# the whole record and it was being thrown away.
+# =====================================================
+function Get-ThreatStatusName($id) {
+    switch ([int]$id) {
+        0   { "Unknown" }
+        1   { "Detected, no action taken" }
+        2   { "Cleaned" }
+        3   { "Quarantined" }
+        4   { "Removed" }
+        5   { "Allowed by user" }
+        6   { "Blocked" }
+        102 { "QUARANTINE FAILED" }
+        103 { "REMOVE FAILED" }
+        104 { "CLEAN FAILED" }
+        105 { "Allow failed" }
+        106 { "Abort failed" }
+        107 { "BLOCK FAILED" }
+        default { "status $id (unmapped)" }
+    }
+}
+
+# Status values meaning the threat was NOT successfully dealt with.
+function Test-ThreatUnresolved($id) {
+    return ([int]$id -in @(1,5,102,103,104,107))
+}
+
+function Get-ThreatResources($resources) {
+    $out = [PSCustomObject]@{
+        Files=[System.Collections.Generic.List[string]]::new()
+        Containers=[System.Collections.Generic.List[string]]::new()
+        Urls=[System.Collections.Generic.List[string]]::new()
+        Pids=[System.Collections.Generic.List[string]]::new()
+        CmdLines=[System.Collections.Generic.List[string]]::new()
+        Amsi=[System.Collections.Generic.List[string]]::new()
+        Other=[System.Collections.Generic.List[string]]::new()
+    }
+    foreach ($r in @($resources)) {
+        if (-not $r) { continue }
+        $str = [string]$r
+        if ($str -match '(?i)^webfile:_(.+)$') {
+            $bits = $Matches[1] -split '\|'
+            if ($bits[0]) { $out.Files.Add($bits[0].Trim()) | Out-Null }
+            for ($i = 1; $i -lt $bits.Count; $i++) {
+                if ($bits[$i] -match '^https?://') { $out.Urls.Add($bits[$i].Trim()) | Out-Null }
+            }
+            continue
+        }
+        if ($str -match '(?i)^containerfile:_(.+)$') { $out.Containers.Add($Matches[1].Trim()) | Out-Null; continue }
+        if ($str -match '(?i)^file:_(.+)$')          { $out.Files.Add($Matches[1].Trim()) | Out-Null; continue }
+        if ($str -match '(?i)^process:_pid:(\d+)')   { $out.Pids.Add($Matches[1]) | Out-Null; continue }
+        if ($str -match '(?i)^cmdline:_(.+)$')       { $out.CmdLines.Add($Matches[1].Trim()) | Out-Null; continue }
+        if ($str -match '(?i)^amsi:_(.+)$')          { $out.Amsi.Add($Matches[1].Trim()) | Out-Null; continue }
+        $out.Other.Add($str) | Out-Null
+    }
+    return $out
+}
+
+# \Device\HarddiskVolume3\Windows\... is unreadable to a moderator. Map the
+# volume to its drive letter where we can.
+$script:VolumeMap = $null
+function Resolve-DevicePath($path) {
+    if (-not $path) { return $path }
+    if ($path -notmatch '^\\Device\\HarddiskVolume') { return $path }
+    if ($null -eq $script:VolumeMap) {
+        $script:VolumeMap = @{}
+        try {
+            foreach ($v in (Get-CimInstance Win32_Volume -ErrorAction Stop | Where-Object { $_.DriveLetter })) {
+                try {
+                    $sb = New-Object System.Text.StringBuilder 1024
+                    if ([Win32Dev]::QueryDosDeviceW($v.DriveLetter, $sb, 1024) -gt 0) {
+                        $script:VolumeMap[$sb.ToString()] = $v.DriveLetter
+                    }
+                } catch {}
+            }
+        } catch {}
+    }
+    foreach ($k in $script:VolumeMap.Keys) {
+        if ($path.StartsWith($k, [StringComparison]::OrdinalIgnoreCase)) {
+            return $script:VolumeMap[$k] + $path.Substring($k.Length)
+        }
+    }
+    return $path
+}
+
+# =====================================================
+# SECURITY PRODUCTS  (v5.7)
+#
+# Everything in the System Protection section assumed Defender was the active
+# antivirus. On a machine running Norton, McAfee, Bitdefender, Kaspersky or
+# similar, Windows puts Defender into PASSIVE mode -- Get-MpComputerStatus then
+# reports AntivirusEnabled = False, and v5.6 flagged that as a finding. It is
+# not one. It is Defender behaving correctly.
+#
+# Windows Security Center registers every AV/firewall/antispyware product in
+# the root\SecurityCenter2 namespace, so we can name the real protection and
+# tell whether it is switched on. What we CANNOT do is read a third-party
+# product's detection history -- there is no common API, and each vendor stores
+# it in its own format. That has to be reported as NOT CHECKED, never as clean.
+# =====================================================
+$script:ThirdPartyAV = @()
+$script:DefenderIsActive = $true
+
+function Convert-ProductState($state) {
+    # 6-hex-digit bitfield. Byte 2 carries the on/off flag, byte 3 the
+    # definition freshness. Documented nowhere official, stable in practice --
+    # the raw value is printed alongside so a reviewer can check it by hand.
+    $out = [PSCustomObject]@{ Enabled=$null; UpToDate=$null; Hex="" }
+    try {
+        $hex = '{0:X6}' -f [int]$state
+        $out.Hex = "0x$hex"
+        $on  = $hex.Substring(2,2)
+        $def = $hex.Substring(4,2)
+        $out.Enabled  = ($on -in @('10','11'))
+        $out.UpToDate = ($def -eq '00')
+    } catch {}
+    return $out
+}
+
+function Run-SecurityProductScan {
+    Write-Header "SECURITY PRODUCTS"
+    $products = @()
+    try {
+        $products = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop)
+    } catch {
+        Write-Skip "Windows Security Center namespace unavailable -- NOT CHECKED"
+        Write-Skip "  (absent on Server SKUs; the antivirus in use cannot be identified)"
+        Mark-Skipped "Security Products" "root\SecurityCenter2 unavailable -- antivirus in use could not be identified"
+        Write-SectionResult "Security Products"
+        return
+    }
+
+    Mark-Ran "Security Products" "$($products.Count) registered antivirus product(s)"
+
+    if ($products.Count -eq 0) {
+        Write-Critical "NO antivirus product is registered with Windows Security Center"
+        Add-Finding -Section "Security Products" -Type "NoAntivirus" `
+            -Detail "No AV registered with Windows Security Center" -Severity "Critical" -Tier "A" `
+            -Evidence "every supported Windows install has at least Defender registered. An empty list means protection was deliberately removed or the Security Center service was tampered with."
+        Add-Timeline "No antivirus registered with Security Center"
+        Write-SectionResult "Security Products"
+        return
+    }
+
+    foreach ($p in $products) {
+        $name  = [string]$p.displayName
+        $path  = [string]$p.pathToSignedProductExe
+        $st    = Convert-ProductState $p.productState
+        $isDef = ($name -like "*Windows Defender*" -or $name -like "*Microsoft Defender*")
+
+        $stateTxt = "$(if($st.Enabled -eq $true){'ON'}elseif($st.Enabled -eq $false){'OFF'}else{'unknown'})" +
+                    ", definitions $(if($st.UpToDate -eq $true){'current'}elseif($st.UpToDate -eq $false){'OUT OF DATE'}else{'unknown'})"
+
+        if (-not $isDef) {
+            $script:ThirdPartyAV += [PSCustomObject]@{ Name=$name; Path=$path; Enabled=$st.Enabled }
+            if ($st.Enabled -eq $true) { $script:DefenderIsActive = $false }
+        }
+
+        if ($st.Enabled -eq $true -and $st.UpToDate -eq $true) {
+            Write-OK "$name -- $stateTxt"
+            Add-Finding -Section "Security Products" -Type "AntivirusPresent" -Detail $name `
+                -Value $stateTxt -Severity "Context" -Evidence "state $($st.Hex); $path"
+        }
+        elseif ($st.Enabled -eq $true) {
+            Write-Amber "$name -- $stateTxt"
+            Add-Finding -Section "Security Products" -Type "AntivirusOutOfDate" -Detail $name `
+                -Value $stateTxt -Severity "Review" -Evidence "state $($st.Hex); $path"
+        }
+        else {
+            # Defender being off is expected when a third-party product is on --
+            # that judgement is made after the loop, once we know what else is here.
+            Write-Amber "$name -- $stateTxt"
+            Add-Finding -Section "Security Products" -Type "AntivirusDisabled" -Detail $name `
+                -Value $stateTxt -Severity $(if ($isDef) { "Context" } else { "Review" }) `
+                -Evidence "state $($st.Hex); $path$(if($isDef){'. Defender reports disabled -- see whether another product is active.'})"
+        }
+    }
+
+    try {
+        foreach ($fw in @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName FirewallProduct -ErrorAction Stop)) {
+            $fst = Convert-ProductState $fw.productState
+            Write-Info "Firewall: $($fw.displayName) -- $(if($fst.Enabled -eq $true){'ON'}else{'OFF'})"
+            Add-Finding -Section "Security Products" -Type "FirewallProduct" -Detail ([string]$fw.displayName) `
+                -Value $(if($fst.Enabled -eq $true){"enabled"}else{"disabled"}) -Severity "Context" -Evidence "state $($fst.Hex)"
+        }
+    } catch {}
+
+    Write-Host ""
+    if ($script:ThirdPartyAV.Count -gt 0) {
+        $names = ($script:ThirdPartyAV | ForEach-Object { $_.Name }) -join ", "
+        Write-Warn "Third-party antivirus in use: $names"
+        Write-Warn "  Its detection history CANNOT be read -- there is no common API and each"
+        Write-Warn "  vendor stores it in a proprietary format. That evidence source is missing"
+        Write-Warn "  from this scan, and a clean report does NOT mean that product found nothing."
+        Add-Finding -Section "Security Products" -Type "ThirdPartyAVHistoryUnreadable" `
+            -Detail "Detection history unavailable for: $names" -Severity "Review" `
+            -Evidence "the Defender threat-history check does not apply to this machine. Ask the operator to export their antivirus's own quarantine/history log separately."
+    }
+    Write-SectionResult "Security Products"
+}
+
+# =====================================================
 # SECTION 1 -- SYSTEM PROTECTION
 # =====================================================
 function Run-Section1 {
@@ -1799,11 +2318,27 @@ function Run-Section1 {
     Write-Info "Windows Defender..."
     try {
         $mp = Get-MpComputerStatus -ErrorAction Stop
+        # Defender goes passive when another AV registers. Reporting that as a
+        # finding would flag every Norton/McAfee/Bitdefender machine.
+        $otherAV = ($script:ThirdPartyAV | Where-Object { $_.Enabled -eq $true })
+        $passiveOK = ($otherAV -and $otherAV.Count -gt 0)
+        $otherNames = if ($passiveOK) { ($otherAV | ForEach-Object { $_.Name }) -join ", " } else { "" }
+
         if ($mp.AntivirusEnabled) { Write-OK "Defender antivirus: Enabled" }
-        else { Write-Fail "Defender antivirus: DISABLED"
-               Add-Finding -Section "System Protection" -Type "DefenderDisabled" -Detail "Antivirus disabled" -Severity "Review"
-               Add-Timeline "Defender antivirus disabled" }
+        elseif ($passiveOK) {
+            Write-OK "Defender antivirus: passive -- $otherNames is the active product"
+            Add-Finding -Section "System Protection" -Type "DefenderPassive" `
+                -Detail "Defender is passive; active product is $otherNames" -Severity "Context" `
+                -Evidence "expected behaviour when a third-party antivirus registers with Windows Security Center. Not an indicator."
+        }
+        else { Write-Fail "Defender antivirus: DISABLED and no other product is active"
+               Add-Finding -Section "System Protection" -Type "DefenderDisabled" `
+                   -Detail "Antivirus disabled with no replacement" -Severity "Review" `
+                   -Evidence "no third-party antivirus is registered and enabled, so this machine has no active real-time protection"
+               Add-Timeline "Defender antivirus disabled, no replacement" }
+
         if ($mp.RealTimeProtectionEnabled) { Write-OK "Real-time protection: Enabled" }
+        elseif ($passiveOK) { Write-Ctx "Real-time protection: handled by $otherNames" }
         else { Write-Fail "Real-time protection: DISABLED"
                Add-Finding -Section "System Protection" -Type "RTPDisabled" -Detail "Real-time protection disabled" -Severity "Review" }
         if ($mp.IsTamperProtected) { Write-OK "Tamper protection: Enabled" }
@@ -1888,27 +2423,86 @@ function Run-Section1 {
     } catch { $script:ShadowCount = 0 }
 
     Write-Info "Defender threat history..."
+    if (-not $script:DefenderIsActive) {
+        $names = ($script:ThirdPartyAV | ForEach-Object { $_.Name }) -join ", "
+        Write-Skip "Defender is not the active antivirus on this machine ($names)."
+        Write-Skip "  Its threat history will be empty or stale, and $names's own detection"
+        Write-Skip "  history cannot be read by this tool. NO first-party AV evidence available."
+        Add-Finding -Section "Security Products" -Type "DefenderHistoryNotApplicable" `
+            -Detail "Defender threat history skipped -- $names is the active product" -Severity "Review" `
+            -Evidence "the strongest evidence source in this scan is unavailable on this machine. Request the operator export their antivirus's quarantine log separately before treating a clean result as meaningful."
+    }
     try {
-        $threats = @(Get-MpThreatDetection -ErrorAction Stop | Sort-Object InitialDetectionTime -Descending | Select-Object -First 50)
+        $threats = @(Get-MpThreatDetection -ErrorAction Stop | Sort-Object InitialDetectionTime -Descending | Select-Object -First 200)
         if ($threats.Count -eq 0) { Write-OK "No Defender threat detections recorded" }
+        $stillOnDisk = @{}
         foreach ($t in $threats) {
+            if ($script:ScanDaysBack -lt 9999 -and $t.InitialDetectionTime -lt $script:ScanCutoff) { continue }
             $name = ""
             try { $name = (Get-MpThreat -ThreatID $t.ThreatID -ErrorAction SilentlyContinue).ThreatName } catch {}
             if (-not $name) { $name = "ThreatID $($t.ThreatID)" }
-            $when = try { $t.InitialDetectionTime.ToString("yyyy-MM-dd HH:mm:ss") } catch { "unknown" }
-            if ($script:ScanDaysBack -lt 9999 -and $t.InitialDetectionTime -lt $script:ScanCutoff) { continue }
-            $res  = [string]$t.ThreatStatusID
-            $files = ""
-            try { $files = ($t.Resources -join "; ") } catch {}
-            # Active/pending = still on the machine. Remediated = Defender dealt with it.
-            $active = ($t.ThreatStatusID -in @(1,102,103))
-            $sev = if ($active) { "Critical" } else { "Review" }
-            $txt = "Defender detected '$name' at $when (status $res)"
-            if ($sev -eq "Critical") { Write-Hit "$txt -- ACTIVE" } else { Write-Amber $txt }
-            Add-Finding -Section "System Protection" -Type "DefenderDetection" -Detail $name `
-                -Value $when -Severity $sev -Tier "A" `
-                -Evidence "first-party Defender detection. Resources: $files"
-            Add-Timeline "Defender detection: $name at $when"
+            $when       = try { Format-Stamp $t.InitialDetectionTime } catch { "unknown" }
+            $statusName = Get-ThreatStatusName $t.ThreatStatusID
+            $unresolved = Test-ThreatUnresolved $t.ThreatStatusID
+
+            $r = Get-ThreatResources $t.Resources
+
+            # Where did it actually land? Prefer a real file, then the archive
+            # it came out of, then the AMSI-scanned host, then the command line.
+            $primary = ""
+            $exists  = $false
+            $hash    = ""
+            if ($r.Files.Count -gt 0) {
+                $primary = Resolve-DevicePath $r.Files[0]
+                try { $exists = Test-Path -LiteralPath $primary -ErrorAction SilentlyContinue } catch {}
+                if ($exists) {
+                    $stillOnDisk[$primary] = $name
+                    $hash = Get-FileSha256 $primary
+                }
+            }
+            elseif ($r.Containers.Count -gt 0) { $primary = Resolve-DevicePath $r.Containers[0] }
+            elseif ($r.Amsi.Count -gt 0)       { $primary = Resolve-DevicePath $r.Amsi[0] }
+            elseif ($r.CmdLines.Count -gt 0)   { $primary = $r.CmdLines[0] }
+
+            # Still on disk beats any reported status -- Defender may have said
+            # "removed" and been wrong, or the dropper may have replaced it.
+            $sev = if ($exists -or $unresolved) { "Critical" } else { "Review" }
+
+            $head = "Defender detected '$name' at $when -- $statusName"
+            if ($sev -eq "Critical") { Write-Hit $head } else { Write-Amber $head }
+
+            if ($primary) {
+                $tag = if ($exists) { "  [STILL ON DISK]" } elseif ($r.Files.Count -gt 0) { "  (gone)" } else { "" }
+                if ($exists) { Write-Critical "         file : $primary$tag" }
+                else         { Write-Host    "         file : $primary$tag" -ForegroundColor DarkGray }
+            } else {
+                Write-Host "         file : (Defender recorded no path)" -ForegroundColor DarkGray
+            }
+            if ($hash)                  { Write-Host "         sha256: $hash" -ForegroundColor DarkGray }
+            if ($r.Containers.Count -gt 0 -and $r.Files.Count -gt 0) {
+                                          Write-Host "         inside: $($r.Containers[0])" -ForegroundColor DarkGray }
+            foreach ($u in $r.Urls)     { Write-Host "         from  : $u" -ForegroundColor DarkGray }
+            foreach ($pid_ in $r.Pids)  { Write-Host "         ran as: PID $pid_" -ForegroundColor DarkGray }
+            foreach ($c in $r.CmdLines) { Write-Host "         cmd   : $c" -ForegroundColor DarkGray }
+
+            $ev = "Defender first-party detection, $statusName."
+            if ($primary) { $ev += " Path: $primary." }
+            if ($exists)  { $ev += " FILE IS STILL PRESENT ON DISK." }
+            if ($hash)    { $ev += " SHA256: $hash." }
+            if ($r.Containers.Count -gt 0) { $ev += " Container: $($r.Containers -join ', ')." }
+            if ($r.Urls.Count -gt 0)       { $ev += " Source URL: $($r.Urls -join ', ')." }
+            if ($r.Pids.Count -gt 0)       { $ev += " Executed as PID $($r.Pids -join ', ')." }
+            if ($r.CmdLines.Count -gt 0)   { $ev += " Command line: $($r.CmdLines -join ' ; ')." }
+
+            Add-Finding -Section "System Protection" -Type "DefenderDetection" `
+                -Detail "$name -- $(if($primary){$primary}else{'(no path recorded)'})" `
+                -Value $when -Severity $sev -Tier "A" -Evidence $ev
+            Add-Timeline "Defender: $name at $when ($primary)"
+        }
+        if ($stillOnDisk.Count -gt 0) {
+            Write-Host ""
+            Write-Critical "  $($stillOnDisk.Count) detected file(s) are STILL PRESENT on disk:"
+            foreach ($k in $stillOnDisk.Keys) { Write-Critical "    $k  <- $($stillOnDisk[$k])" }
         }
     } catch { Write-Skip "Defender threat history unavailable" }
 
@@ -3582,6 +4176,915 @@ function Run-InjectionHostScan {
     Write-SectionResult "Injection Hosts"
 }
 
+if (-not ([Management.Automation.PSTypeName]'Win32Path').Type) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class Win32Path {
+    public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool QueryFullProcessImageNameW(IntPtr h, uint flags, StringBuilder buf, ref uint size);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CloseHandle(IntPtr h);
+}
+"@ -ErrorAction SilentlyContinue
+}
+
+# MainModule fails on protected and cross-session processes. Try three routes
+# before giving up, and say so plainly rather than printing an empty cell that
+# reads like "no path".
+# A window can outlive the process lookup, and protected processes refuse
+# Get-Process outright. Four routes, so the report never shows a nameless row.
+$script:ProcNameCache = @{}
+function Get-ProcessName($procId) {
+    if ($procId -le 0) { return "(system idle)" }
+    if ($script:ProcNameCache.ContainsKey($procId)) { return $script:ProcNameCache[$procId] }
+    $n = ""
+    try { $p = Get-Process -Id $procId -ErrorAction Stop; if ($p.ProcessName) { $n = "$($p.ProcessName).exe" } } catch {}
+    if (-not $n) {
+        try {
+            $c = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction Stop | Select-Object -First 1
+            if ($c -and $c.Name) { $n = [string]$c.Name }
+        } catch {}
+    }
+    if (-not $n) {
+        $pth = Get-ProcessPath $procId
+        if ($pth -and $pth -ne "could not reach") {
+            try { $n = [IO.Path]::GetFileName($pth) } catch {}
+        }
+    }
+    if (-not $n) { $n = "PID $procId (name unavailable)" }
+    $script:ProcNameCache[$procId] = $n
+    return $n
+}
+
+$script:ProcPathCache = @{}
+function Get-ProcessPath($procId) {
+    if ($procId -le 0) { return "could not reach" }
+    if ($script:ProcPathCache.ContainsKey($procId)) { return $script:ProcPathCache[$procId] }
+    $result = ""
+    try { $pp = Get-Process -Id $procId -ErrorAction Stop; if ($pp.Path) { $result = $pp.Path } } catch {}
+    if (-not $result) {
+        try {
+            $c = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction Stop | Select-Object -First 1
+            if ($c -and $c.ExecutablePath) { $result = $c.ExecutablePath }
+        } catch {}
+    }
+    if (-not $result -and ([Management.Automation.PSTypeName]'Win32Path').Type) {
+        try {
+            $h = [Win32Path]::OpenProcess([Win32Path]::PROCESS_QUERY_LIMITED_INFORMATION, $false, $procId)
+            if ($h -ne [IntPtr]::Zero) {
+                try {
+                    $sb = New-Object System.Text.StringBuilder 1024
+                    $sz = [uint32]1024
+                    if ([Win32Path]::QueryFullProcessImageNameW($h, 0, $sb, [ref]$sz)) { $result = $sb.ToString() }
+                } finally { [void][Win32Path]::CloseHandle($h) }
+            }
+        } catch {}
+    }
+    if (-not $result) { $result = "could not reach" }
+    $script:ProcPathCache[$procId] = $result
+    return $result
+}
+
+# =====================================================
+# BROWSER HISTORY CLEARING  (v5.6)
+# Chromium browsers record when the user last cleared browsing data in their
+# Preferences JSON: browser.last_clear_browsing_data_time, a WebKit timestamp
+# in microseconds since 1601-01-01 UTC. No SQLite needed, and crucially it
+# survives the clear itself.
+# Firefox has no equivalent field, so profile creation time is reported as
+# context instead -- a wiped Firefox profile looks like a new one.
+# =====================================================
+function ConvertFrom-WebKitTime($micro) {
+    try {
+        if (-not $micro -or [double]$micro -le 0) { return $null }
+        return ([DateTime]'1601-01-01T00:00:00Z').AddSeconds([double]$micro / 1000000).ToLocalTime()
+    } catch { return $null }
+}
+
+function Run-BrowserHistoryScan {
+    Write-Header "BROWSER HISTORY CLEARING"
+    Mark-Ran "Browser History"
+    $found = 0; $profileCount = 0
+    foreach ($prof in $allUserProfiles) {
+        foreach ($b in @(
+            @{ N="Chrome"; P="AppData\Local\Google\Chrome\User Data\Default" },
+            @{ N="Edge";   P="AppData\Local\Microsoft\Edge\User Data\Default" },
+            @{ N="Brave";  P="AppData\Local\BraveSoftware\Brave-Browser\User Data\Default" },
+            @{ N="Opera";  P="AppData\Roaming\Opera Software\Opera Stable" }
+        )) {
+            $dir  = Join-Path $prof $b.P
+            $pref = Join-Path $dir "Preferences"
+            if (-not (Test-Path $pref)) { continue }
+            $profileCount++
+            try {
+                $json = Get-Content $pref -Raw -ErrorAction Stop | ConvertFrom-Json
+                $raw = $null
+                try { $raw = $json.browser.last_clear_browsing_data_time } catch {}
+                $when = ConvertFrom-WebKitTime $raw
+                $hist = Join-Path $dir "History"
+                $histSize = if (Test-Path $hist) { (Get-Item $hist).Length } else { 0 }
+                if ($when) {
+                    $inRange = ($script:ScanDaysBack -ge 9999 -or $when -ge $script:ScanCutoff)
+                    $sev = if ($inRange) { "Review" } else { "Context" }
+                    $msg = "$($b.N): browsing data last cleared $(Format-Stamp $when)"
+                    if ($inRange) { Write-Amber $msg } else { Write-Ctx $msg }
+                    Add-Finding -Section "Browser History" -Type "HistoryCleared" `
+                        -Detail "$($b.N) browsing data cleared" -Value (Format-Stamp $when) -Severity $sev `
+                        -Evidence "browser.last_clear_browsing_data_time in $pref. Clearing history is routine maintenance; it matters only when it falls close to the period under review. History DB is $([math]::Round($histSize/1KB,1)) KB."
+                    $browserHistoryEvents.Add([PSCustomObject]@{
+                        Browser=$b.N; Cleared=(Format-Stamp $when); InRange=$inRange
+                        DbSizeKB=[math]::Round($histSize/1KB,1); Path=$pref }) | Out-Null
+                    $found++
+                } else {
+                    Write-Ctx "$($b.N): no record of browsing data ever being cleared"
+                    $browserHistoryEvents.Add([PSCustomObject]@{
+                        Browser=$b.N; Cleared="never recorded"; InRange=$false
+                        DbSizeKB=[math]::Round($histSize/1KB,1); Path=$pref }) | Out-Null
+                }
+            } catch { Write-Ctx "$($b.N): Preferences unreadable" }
+        }
+        $ffRoot = Join-Path $prof "AppData\Roaming\Mozilla\Firefox\Profiles"
+        if (Test-Path $ffRoot) {
+            foreach ($d in @(Get-ChildItem $ffRoot -Directory -ErrorAction SilentlyContinue)) {
+                $tj = Join-Path $d.FullName "times.json"
+                if (-not (Test-Path $tj)) { continue }
+                $profileCount++
+                try {
+                    $t = Get-Content $tj -Raw -ErrorAction Stop | ConvertFrom-Json
+                    $created = ([DateTime]'1970-01-01T00:00:00Z').AddMilliseconds([double]$t.created).ToLocalTime()
+                    Write-Ctx "Firefox: profile created $(Format-Stamp $created) -- Firefox records no clear-history timestamp"
+                    $browserHistoryEvents.Add([PSCustomObject]@{
+                        Browser="Firefox"; Cleared="not recorded by Firefox"; InRange=$false
+                        DbSizeKB=0; Path=$tj }) | Out-Null
+                } catch {}
+            }
+        }
+    }
+    if ($profileCount -eq 0) {
+        Mark-Skipped "Browser History" "no browser profile found"
+        Write-Skip "No browser profiles found -- NOT CHECKED"
+    } else {
+        $script:Sections["Browser History"].Coverage = "$profileCount browser profile(s) examined"
+        if ($found -eq 0) { Write-OK "No browsing-data clear recorded in range" }
+    }
+    Write-SectionResult "Browser History"
+}
+
+# =====================================================
+# SCREEN-CAPTURE EVASION  (NEW in v5.1)
+#
+# A window with WDA_EXCLUDEFROMCAPTURE is drawn on the physical monitor but
+# omitted from anything that captures the screen: OBS, Discord streams, Windows
+# screenshots, remote-desktop sessions. Cheat overlays ship this as
+# "streamproof" and it is enabled by default in at least one Roblox ESP menu.
+#
+# Legitimate uses exist -- some DRM video players, a few banking and password
+# apps -- so this is REVIEW by default and CRITICAL only when the owning
+# process is untrusted. But for a league that verifies by screenshare, this is
+# the single most relevant thing this tool can look for: it is the mechanism
+# that makes a cheat invisible to the exact check you rely on.
+# =====================================================
+function Run-CaptureEvasionScan {
+    Write-Header "SCREEN-CAPTURE EVASION (streamproof overlays)"
+    if (-not ([Management.Automation.PSTypeName]'Win32Wnd').Type) {
+        Write-Skip "Window enumeration type unavailable -- NOT CHECKED"
+        Mark-Skipped "Capture Evasion" "Win32Wnd type could not be created"
+        Write-SectionResult "Capture Evasion"
+        return
+    }
+
+    $hits = [System.Collections.Generic.List[object]]::new()
+    $seen = 0
+    $callback = [Win32Wnd+EnumWindowsProc]{
+        param($hWnd, $lParam)
+        $script:__capSeen++
+        $aff = 0
+        if ([Win32Wnd]::GetWindowDisplayAffinity($hWnd, [ref]$aff)) {
+            if ($aff -ne [Win32Wnd]::WDA_NONE) {
+                $procId = 0
+                [void][Win32Wnd]::GetWindowThreadProcessId($hWnd, [ref]$procId)
+                $sbT = New-Object System.Text.StringBuilder 512
+                [void][Win32Wnd]::GetWindowTextW($hWnd, $sbT, 512)
+                $sbC = New-Object System.Text.StringBuilder 256
+                [void][Win32Wnd]::GetClassNameW($hWnd, $sbC, 256)
+                $script:__capHits.Add([PSCustomObject]@{
+                    Handle    = "0x$($hWnd.ToInt64().ToString('X'))"
+                    Affinity  = $aff
+                    Title     = $sbT.ToString()
+                    Class     = $sbC.ToString()
+                    PID       = [int]$procId
+                    Visible   = [Win32Wnd]::IsWindowVisible($hWnd)
+                }) | Out-Null
+            }
+        }
+        return $true
+    }
+
+    $script:__capHits = $hits
+    $script:__capSeen = 0
+    try { [void][Win32Wnd]::EnumWindows($callback, [IntPtr]::Zero) }
+    catch {
+        Write-Skip "Window enumeration failed: $($_.Exception.Message)"
+        Mark-Skipped "Capture Evasion" "EnumWindows failed"
+        Write-SectionResult "Capture Evasion"
+        return
+    }
+    $seen = $script:__capSeen
+    Mark-Ran "Capture Evasion" "$seen top-level window(s) checked"
+
+    # Publishers with a defensible reason to hide from capture.
+    $trustedSigners = @("Microsoft Corporation","Microsoft Windows","Netflix",
+                        "Apple Inc","Spotify AB","Google LLC","Citrix","VMware",
+                        "AgileBits","1Password","Bitwarden","KeePass")
+
+    if ($hits.Count -eq 0) {
+        Write-OK "No window is excluded from screen capture ($seen checked)"
+    }
+    foreach ($h in $hits) {
+        $pname = Get-ProcessName $h.PID
+        $ppath = Get-ProcessPath $h.PID
+        $reachable = ($ppath -and $ppath -ne "could not reach")
+        $sig = if ($reachable) { Get-SigInfo $ppath } else { $null }
+        $trusted = $false
+        if ($sig -and $sig.Status -eq "Valid") {
+            foreach ($t in $trustedSigners) { if ($sig.Subject -like "*$t*") { $trusted = $true; break } }
+        }
+
+        $mode = if ($h.Affinity -eq [Win32Wnd]::WDA_EXCLUDEFROMCAPTURE) { "EXCLUDEFROMCAPTURE" }
+                elseif ($h.Affinity -eq [Win32Wnd]::WDA_MONITOR) { "MONITOR-ONLY" }
+                else { "0x$($h.Affinity.ToString('X'))" }
+
+        $m = Test-CheatMatch $pname
+        if (-not $m -and $reachable) { $m = Test-CheatMatch $ppath }
+
+        # NAME/SIGNER MISMATCH -- the check that actually defeats renaming.
+        # An unsigned binary called RobloxPlayerBeta.exe still reads NotSigned.
+        $mismatch = ""
+        if ($reachable) {
+            $leaf = try { [IO.Path]::GetFileName($ppath).ToLower() } catch { "" }
+            $lowPath = $ppath.ToLower()
+            $sysDir = "$($env:SystemRoot.ToLower())\system32\"
+            $wowDir = "$($env:SystemRoot.ToLower())\syswow64\"
+            foreach ($claim in @(
+                @{ N="robloxplayerbeta.exe"; S="Roblox Corporation"; T="Roblox" },
+                @{ N="robloxstudiobeta.exe"; S="Roblox Corporation"; T="Roblox" },
+                @{ N="chrome.exe";  S="Google";    T="Google" },
+                @{ N="msedge.exe";  S="Microsoft"; T="Microsoft" },
+                @{ N="discord.exe"; S="Discord";   T="Discord" },
+                @{ N="steam.exe";   S="Valve";     T="Valve" })) {
+                if ($leaf -ne $claim.N) { continue }
+                if (-not ($sig -and $sig.Status -eq "Valid" -and $sig.Subject -like "*$($claim.S)*")) {
+                    $mismatch = "filename claims $($claim.T), signature does not match"
+                }
+            }
+            if (-not $mismatch -and $leaf -in @("svchost.exe","rundll32.exe","dllhost.exe","taskhostw.exe","conhost.exe","lsass.exe","winlogon.exe","csrss.exe","services.exe")) {
+                if (-not ($lowPath.StartsWith($sysDir) -or $lowPath.StartsWith($wowDir))) {
+                    $mismatch = "$leaf running from outside System32"
+                }
+            }
+        }
+
+        $sev = if ($m -and $m.Tier -eq "A") { "Critical" }
+               elseif ($mismatch) { "Critical" }
+               elseif ($trusted) { "Context" }
+               elseif ($sig -and $sig.Status -ne "Valid") { "Critical" }
+               elseif (-not $reachable) { "Review" }
+               else { "Review" }
+
+        $captureWindows.Add([PSCustomObject]@{
+            Verdict   = switch ($sev) { "Critical" {"CRITICAL"} "Review" {"REVIEW"} default {"TRUSTED"} }
+            Severity  = $sev
+            Process   = $pname
+            ProcId    = $h.PID
+            Mode      = $mode
+            Title     = $h.Title
+            Class     = $h.Class
+            SigStatus = if ($sig) { $sig.Status } elseif ($reachable) { "unknown" } else { "could not reach" }
+            Signer    = if ($sig) { $sig.Subject } else { "" }
+            Path      = $ppath
+            Mismatch  = $mismatch
+            Untrusted = (-not $trusted)
+        }) | Out-Null
+
+        $txt = "Window hidden from screen capture [$mode]: '$($h.Title)' class=$($h.Class) owner=$pname"
+        switch ($sev) {
+            "Critical" { Write-Critical $txt }
+            "Review"   { Write-Amber $txt }
+            default    { Write-Ctx "$txt (trusted publisher)" }
+        }
+        Add-Finding -Section "Capture Evasion" -Type "CaptureExcludedWindow" `
+            -Detail "$pname : $($h.Title)" -Value $mode -Severity $sev `
+            -Tier $(if ($m) { $m.Tier } else { "" }) `
+            -Evidence "SetWindowDisplayAffinity hides this window from OBS, Discord, screenshots and remote desktop while leaving it visible on the monitor. $(if($mismatch){"MISMATCH: $mismatch. "})Owner path: $ppath ; signature: $(if($sig){$sig.Status}else{'unknown'}) $(if($sig){$sig.Subject}else{''})"
+        if ($sev -ne "Context") { Add-Timeline "Capture-excluded window owned by $pname" }
+    }
+    Write-SectionResult "Capture Evasion"
+}
+
+# =====================================================
+# CHEAT CONFIG ARTIFACTS  (NEW in v5.1)
+#
+# Overlay cheats keep their settings outside the binary so the exe can be
+# renamed or re-downloaded freely. Those config artifacts are frequently the
+# only thing left after the exe is deleted, and users rarely think to remove
+# them. Antenna, for example, requires an HKCU key pointing at an offsets file
+# before it will run at all -- renaming the exe does not remove that key.
+# =====================================================
+$cheatRegistryRoots = @(
+    "antenna","solara","fluxus","synapse","krnl","xeno","celery","sirhurt",
+    "trigon","hydrogen","seliware","cryptware","matcha","isabelle","zorara",
+    "arceus","evon","calamari","scriptware","dx9ware","aimmy","thunderaim"
+)
+$cheatConfigNames = @(
+    "offsets.json","antenna_cfg.jsonc","antenna_cfg.json",
+    "autoload.cfg","autoload.json","cheat_cfg.json","menu_cfg.json",
+    "esp_config.json","aimbot.cfg"
+)
+
+function Run-CheatConfigScan {
+    Write-Header "CHEAT CONFIG & REGISTRY ARTIFACTS"
+    Mark-Ran "Cheat Configs"
+    $n = 0
+
+    # ---- HKCU root keys. A cheat that stores its config path here leaves a
+    # ---- key that survives deleting the executable.
+    Write-Info "HKCU root keys..."
+    try {
+        foreach ($k in @(Get-ChildItem "HKCU:\" -ErrorAction SilentlyContinue)) {
+            $name = $k.PSChildName
+            $nl = $name.ToLower()
+            $matched = $null
+            foreach ($r in $cheatRegistryRoots) { if ($nl -eq $r) { $matched = $r; break } }
+            if (-not $matched) {
+                $m = Test-CheatMatch $name
+                if ($m -and $m.Tier -eq "A") { $matched = $m.Term }
+            }
+            if (-not $matched) { continue }
+            $vals = @()
+            try {
+                $props = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+                if ($props) {
+                    $props.PSObject.Properties | Where-Object { $_.Name -notlike "PS*" } |
+                        ForEach-Object { $vals += "$($_.Name)=$($_.Value)" }
+                }
+            } catch {}
+            Write-Critical "Cheat registry key: HKCU\$name"
+            foreach ($v in $vals) { Write-Critical "    $v" }
+            Add-Finding -Section "Cheat Configs" -Type "CheatRegistryKey" -Detail "HKCU\$name" `
+                -Value $matched -Severity "Critical" -Tier "A" `
+                -Evidence "values: $($vals -join ' | ') -- this key persists after the executable is deleted"
+            Add-Timeline "Cheat registry key HKCU\$name"
+            $n++
+        }
+    } catch { Write-Skip "HKCU enumeration failed" }
+
+    # ---- config files by name, wherever they landed
+    Write-Info "Config files..."
+    $roots = @("$env:USERPROFILE\Downloads","$env:USERPROFILE\Desktop","$env:USERPROFILE\Documents",
+               "$env:TEMP","$env:APPDATA","$env:LOCALAPPDATA")
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) { continue }
+        foreach ($f in @(Get-ChildItem $root -File -Force -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+                         Where-Object { $cheatConfigNames -contains $_.Name.ToLower() })) {
+            if (Is-GlobalFP $f.FullName) { Add-FP "CheatConfig" $f.FullName "global FP list"; continue }
+            $preview = ""
+            try { $preview = (Get-Content $f.FullName -TotalCount 3 -ErrorAction Stop) -join " " } catch {}
+            if ($preview.Length -gt 200) { $preview = $preview.Substring(0,200) }
+            Write-Critical "Cheat config file: $($f.FullName)"
+            Add-Finding -Section "Cheat Configs" -Type "CheatConfigFile" -Detail $f.FullName `
+                -Value $f.Name -Severity "Critical" -Tier "A" `
+                -Evidence "modified $(Format-Stamp $f.LastWriteTime); first lines: $preview"
+            Add-Timeline "Cheat config file $($f.FullName)"
+            $n++
+        }
+    }
+
+    # ---- a "logs" folder sitting beside a recently-run unsigned exe
+    Write-Info "Cheat log folders..."
+    foreach ($root in @("$env:USERPROFILE\Downloads","$env:USERPROFILE\Desktop","$env:TEMP")) {
+        if (-not (Test-Path $root)) { continue }
+        foreach ($d in @(Get-ChildItem $root -Directory -Force -ErrorAction SilentlyContinue |
+                         Where-Object { $_.Name -ieq "logs" })) {
+            $siblingExe = @(Get-ChildItem $d.Parent.FullName -File -Filter "*.exe" -Force -ErrorAction SilentlyContinue)
+            foreach ($e in $siblingExe) {
+                $sig = Get-SigInfo $e.FullName
+                if ($sig.Status -eq "Valid") { continue }
+                Write-Amber "Unsigned exe with a sibling 'logs' folder: $($e.FullName)"
+                Add-Finding -Section "Cheat Configs" -Type "UnsignedExeWithLogs" -Detail $e.FullName `
+                    -Severity "Review" `
+                    -Evidence "a 'logs' directory beside an unsigned executable -- overlay cheats write debug logs there and ask users to send them to the developer"
+                $n++
+            }
+        }
+    }
+
+    if ($n -eq 0) { Write-OK "No cheat config or registry artifacts found" }
+    Write-SectionResult "Cheat Configs"
+}
+
+# =====================================================
+# PE IMPORT PARSER + IMPHASH  (v5.3)
+#
+# An import hash fingerprints WHICH Windows APIs a binary uses and in what
+# order. It survives renaming, recompiling with cosmetic changes, and resource
+# edits -- everything that defeats a filename or a file hash. Changing it means
+# genuinely changing what the program calls.
+#
+# Verified against a known sample: this implementation reproduces the standard
+# pefile imphash exactly.
+# =====================================================
+function ConvertTo-FileOffset($secs, $rva) {
+    foreach ($s in $secs) {
+        $span = [Math]::Max($s.VS, $s.RS)
+        if ($rva -ge $s.VA -and $rva -lt ($s.VA + $span)) { return $s.RO + ($rva - $s.VA) }
+    }
+    return -1
+}
+
+function Read-CString($bytes, $off) {
+    if ($off -lt 0 -or $off -ge $bytes.Length) { return "" }
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = $off; $i -lt $bytes.Length -and $i -lt $off + 512; $i++) {
+        if ($bytes[$i] -eq 0) { break }
+        [void]$sb.Append([char]$bytes[$i])
+    }
+    return $sb.ToString()
+}
+
+function Get-PEImportInfo($path) {
+    $res = [PSCustomObject]@{
+        Ok = $false; Dlls = @(); Funcs = @(); Imphash = ""; Compiled = $null; Is64 = $false
+    }
+    try {
+        $fi = Get-Item $path -ErrorAction Stop
+        if ($fi.Length -lt 1024 -or $fi.Length -gt 64MB) { return $res }
+        $b = [System.IO.File]::ReadAllBytes($path)
+        if ($b.Length -lt 0x40 -or $b[0] -ne 0x4D -or $b[1] -ne 0x5A) { return $res }   # MZ
+
+        $peOff = [BitConverter]::ToInt32($b, 0x3C)
+        if ($peOff -le 0 -or ($peOff + 264) -ge $b.Length) { return $res }
+        if ([BitConverter]::ToUInt32($b, $peOff) -ne 0x00004550) { return $res }        # PE\0\0
+
+        $coff    = $peOff + 4
+        $nsec    = [BitConverter]::ToUInt16($b, $coff + 2)
+        $tsRaw   = [BitConverter]::ToUInt32($b, $coff + 4)
+        $optSize = [BitConverter]::ToUInt16($b, $coff + 16)
+        $opt     = $coff + 20
+        $magic   = [BitConverter]::ToUInt16($b, $opt)
+        $is64    = ($magic -eq 0x20B)
+        $res.Is64 = $is64
+        if ($tsRaw -gt 0) {
+            try { $res.Compiled = ([DateTime]'1970-01-01T00:00:00Z').AddSeconds($tsRaw) } catch {}
+        }
+
+        # DataDirectory[1] is the IMPORT table. [0] is EXPORT -- an easy off-by-one.
+        $ddBase = $opt + $(if ($is64) { 112 } else { 96 })
+        $impRva = [BitConverter]::ToUInt32($b, $ddBase + 8)
+        if ($impRva -eq 0) { return $res }
+
+        $secOff = $opt + $optSize
+        $secs = @()
+        for ($i = 0; $i -lt $nsec; $i++) {
+            $o = $secOff + ($i * 40)
+            if (($o + 40) -gt $b.Length) { break }
+            $secs += [PSCustomObject]@{
+                VS = [BitConverter]::ToUInt32($b, $o + 8)
+                VA = [BitConverter]::ToUInt32($b, $o + 12)
+                RS = [BitConverter]::ToUInt32($b, $o + 16)
+                RO = [BitConverter]::ToUInt32($b, $o + 20)
+            }
+        }
+        if ($secs.Count -eq 0) { return $res }
+
+        $psz     = if ($is64) { 8 } else { 4 }
+        $ordMask = if ($is64) { ([uint64]1 -shl 63) } else { ([uint64]1 -shl 31) }
+        $parts = [System.Collections.Generic.List[string]]::new()
+        $dlls  = [System.Collections.Generic.List[string]]::new()
+        $funcs = [System.Collections.Generic.List[string]]::new()
+
+        $off = ConvertTo-FileOffset $secs $impRva
+        $guard = 0
+        while ($off -ge 0 -and ($off + 20) -le $b.Length -and $guard -lt 512) {
+            $guard++
+            $oft  = [BitConverter]::ToUInt32($b, $off)
+            $nRva = [BitConverter]::ToUInt32($b, $off + 12)
+            $ft   = [BitConverter]::ToUInt32($b, $off + 16)
+            if ($nRva -eq 0) { break }
+
+            $dll = Read-CString $b (ConvertTo-FileOffset $secs $nRva)
+            if (-not $dll) { break }
+            $dlls.Add($dll) | Out-Null
+            $dl = $dll.ToLower()
+            foreach ($ext in @(".dll",".ocx",".sys")) {
+                if ($dl.EndsWith($ext)) { $dl = $dl.Substring(0, $dl.Length - 4); break }
+            }
+
+            $thunkRva = if ($oft -ne 0) { $oft } else { $ft }
+            $to = ConvertTo-FileOffset $secs $thunkRva
+            $g2 = 0
+            while ($to -ge 0 -and ($to + $psz) -le $b.Length -and $g2 -lt 8192) {
+                $g2++
+                $val = if ($is64) { [BitConverter]::ToUInt64($b, $to) } else { [uint64][BitConverter]::ToUInt32($b, $to) }
+                if ($val -eq 0) { break }
+                if (($val -band $ordMask) -ne 0) {
+                    $parts.Add("$dl.ord$([int]($val -band 0xFFFF))") | Out-Null
+                } else {
+                    $nameOff = ConvertTo-FileOffset $secs ([uint32]($val -band [uint64]0x7FFFFFFF))
+                    if ($nameOff -ge 0) {
+                        $fn = Read-CString $b ($nameOff + 2)
+                        if ($fn) {
+                            $parts.Add("$dl.$($fn.ToLower())") | Out-Null
+                            $funcs.Add($fn.ToLower()) | Out-Null
+                        }
+                    }
+                }
+                $to += $psz
+            }
+            $off += 20
+        }
+
+        if ($parts.Count -eq 0) { return $res }
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        try {
+            $joined = ($parts -join ",")
+            $hashB  = $md5.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($joined))
+            $res.Imphash = (($hashB | ForEach-Object { $_.ToString("x2") }) -join "")
+        } finally { $md5.Dispose() }
+
+        $res.Dlls  = @($dlls)
+        $res.Funcs = @($funcs)
+        $res.Ok    = $true
+    } catch {}
+    return $res
+}
+
+# =====================================================
+# PE BEHAVIOUR SIGNATURES  (v5.3)
+#
+# These describe what a binary is CAPABLE of, from its import table. They are
+# the rules that survive a rebuild under a new name, because changing them
+# means changing what the program actually does.
+# =====================================================
+function Run-PESignatureScan {
+    Write-Header "PE BEHAVIOUR SIGNATURES"
+    Mark-Ran "PE Signatures"
+
+    $paths = @("$env:TEMP","$env:LOCALAPPDATA\Temp","$env:APPDATA","$env:LOCALAPPDATA",
+               "$env:USERPROFILE\Downloads","$env:USERPROFILE\Desktop","$env:USERPROFILE\Documents")
+    $checked = 0; $fired = 0; $failed = 0
+
+    foreach ($sp in $paths) {
+        if (-not (Test-Path $sp)) { continue }
+        foreach ($exe in @(Get-ChildItem $sp -File -Force -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+                           Where-Object { $_.Extension -match '^\.(exe|dll|scr)$' -and $_.Length -lt 64MB })) {
+            if (Is-GlobalFP $exe.FullName) { continue }
+
+            $sig = Get-SigInfo $exe.FullName
+            if ($sig.Status -eq "Valid") {
+                $trusted = $false
+                foreach ($t in @("Microsoft Corporation","Microsoft Windows","Roblox Corporation",
+                                 "Google LLC","Discord Inc","Valve","NVIDIA","Advanced Micro Devices")) {
+                    if ($sig.Subject -like "*$t*") { $trusted = $true; break }
+                }
+                if ($trusted) { continue }
+            }
+
+            $selfTxt = Get-PEHeaderString $exe.FullName 1048576
+            if (Test-IsSelf $selfTxt.ToLower()) {
+                Add-FP "PE Signatures" $exe.FullName "this is the scanner itself"
+                continue
+            }
+            $pe = Get-PEImportInfo $exe.FullName
+            if (-not $pe.Ok) { $failed++; continue }
+            $checked++
+            $f = $pe.Funcs
+
+            # ---- PE-IMPHASH-01 : import hash on the blocklist ----
+            if ($pe.Imphash -and $script:ImphashBlocklist.ContainsKey($pe.Imphash)) {
+                Write-Critical "[PE-IMPHASH-01] $($exe.FullName)"
+                Write-Critical "                imphash $($pe.Imphash) = $($script:ImphashBlocklist[$pe.Imphash])"
+                Add-Finding -Section "PE Signatures" -Type "PE-IMPHASH-01" -Detail $exe.FullName `
+                    -Value $script:ImphashBlocklist[$pe.Imphash] -Severity "Critical" -Tier "A" `
+                    -Evidence "import hash $($pe.Imphash) matches a known cheat build. Renaming the file does not change this; only changing which APIs it calls does."
+                Add-Timeline "PE-IMPHASH-01: $($exe.FullName)"
+                $fired++
+                continue
+            }
+
+            $reads   = ($f -contains 'openprocess') -and ($f -contains 'readprocessmemory')
+            $writes  = ($f -contains 'writeprocessmemory') -or ($f -contains 'virtualallocex') -or
+                       ($f -contains 'createremotethread') -or ($f -contains 'ntmapviewofsection')
+            $walks   = ($f -contains 'createtoolhelp32snapshot') -or ($f -contains 'module32first') -or
+                       ($f -contains 'module32firstw') -or ($f -contains 'enumprocessmodules')
+            $input_  = ($f -contains 'sendinput') -or ($f -contains 'setcursorpos') -or
+                       ($f -contains 'mouse_event') -or ($f -contains 'getasynckeystate')
+            $overlay = ($f -contains 'setlayeredwindowattributes') -or ($f -contains 'd3d11createdevice') -or
+                       ($f -contains 'd3d11createdeviceandswapchain')
+            $capture = ($f -contains 'setwindowdisplayaffinity')
+            $driver  = ($f -contains 'deviceiocontrol')
+
+            # ---- CAPTURE-PE-01 : streamproof, found on disk, not running ----
+            # This is the one that matters for a league: it fires even when the
+            # cheat is closed, so the exe cannot simply be shut before a scan.
+            if ($capture) {
+                $sev = if ($sig.Status -eq "Valid") { "Review" } else { "Critical" }
+                Write-Critical "[CAPTURE-PE-01] imports SetWindowDisplayAffinity: $($exe.FullName)"
+                Add-Finding -Section "PE Signatures" -Type "CAPTURE-PE-01" -Detail $exe.FullName `
+                    -Value "SetWindowDisplayAffinity" -Severity $sev -Tier "A" `
+                    -Evidence "this binary can hide its own windows from OBS, Discord, screenshots and remote desktop while staying visible on the monitor. Fires whether or not it is currently running. Signature: $($sig.Status) $($sig.Subject)"
+                Add-Timeline "CAPTURE-PE-01: $($exe.FullName)"
+                $fired++
+            }
+
+            # ---- EXTMEM-PE-01 : external read-only cheat profile ----
+            if ($reads -and -not $writes -and $walks -and $input_ -and $overlay) {
+                Write-Critical "[EXTMEM-PE-01] external ESP/aimbot profile: $($exe.FullName)"
+                Add-Finding -Section "PE Signatures" -Type "EXTMEM-PE-01" -Detail $exe.FullName `
+                    -Value "imphash $($pe.Imphash)" -Severity "Critical" -Tier "A" `
+                    -Evidence "reads another process's memory, walks its modules, synthesises mouse/keyboard input and draws a layered/D3D overlay -- but NEVER writes to or injects into the target. That is the external read-only cheat pattern, and it is invisible to module-enumeration and injection checks. Compiled $(if($pe.Compiled){Format-Stamp $pe.Compiled}else{'unknown'})."
+                Add-Timeline "EXTMEM-PE-01: $($exe.FullName)"
+                $fired++
+            }
+            elseif ($reads -and $writes -and $walks) {
+                Write-Amber "[EXTMEM-PE-02] memory-writing tool: $($exe.FullName)"
+                Add-Finding -Section "PE Signatures" -Type "EXTMEM-PE-02" -Detail $exe.FullName `
+                    -Value "imphash $($pe.Imphash)" -Severity "Review" `
+                    -Evidence "reads AND writes another process's memory. Debuggers, trainers and some anti-cheats do this legitimately -- verify what it is."
+                $fired++
+            }
+
+            # ---- DRIVER-PE-01 ----
+            if ($driver -and $reads -and $sig.Status -ne "Valid") {
+                Write-Amber "[DRIVER-PE-01] unsigned binary with driver IOCTL + process access: $($exe.FullName)"
+                Add-Finding -Section "PE Signatures" -Type "DRIVER-PE-01" -Detail $exe.FullName `
+                    -Value "DeviceIoControl" -Severity "Review" `
+                    -Evidence "talks to a kernel driver and opens processes; common in kernel-assisted cheats, also in legitimate system utilities"
+            }
+        }
+    }
+
+    $script:Sections["PE Signatures"].Coverage = "$checked import table(s) parsed, $failed unreadable"
+    if ($checked -eq 0 -and $failed -gt 0) {
+        Write-Warn "No import table could be parsed ($failed attempts failed) -- this is NOT a clean result"
+        Mark-Skipped "PE Signatures" "all $failed import-table parses failed"
+    }
+    elseif ($fired -eq 0) { Write-OK "No PE behaviour signature fired ($checked parsed, $failed unreadable)" }
+    Write-SectionResult "PE Signatures"
+}
+
+# =====================================================
+# NAMED SIGNATURE SCAN  (v5.2)
+#
+# Every rule here has an ID. When a report is disputed, "ANTENNA-REG-01 fired"
+# is something a reviewer can look up, argue with, and check by hand. "The
+# scanner said suspicious" is not.
+#
+# Rule ID format:  <FAMILY>-<CLASS>-<NN>
+#   FAMILY  ANTENNA, OVERLAY, EXTMEM ...
+#   CLASS   REG (registry), CFG (config file), LOG, NET, WIN (window),
+#           PROC (process), HASH
+#
+# Confidence is stated per rule rather than implied by colour:
+#   Critical = the artifact has no legitimate explanation
+#   Review   = strong indicator, but a benign cause exists
+# =====================================================
+
+# ImGui/overlay window classes seen in game-overlay menus.
+$overlayWindowClasses = @(
+    "imgui platform","imgui","dear imgui","overlay","kiero",
+    "d3d11 overlay","directx overlay"
+)
+
+function Run-SignatureScan {
+    Write-Header "NAMED SIGNATURES"
+    Mark-Ran "Signatures"
+    $fired = 0
+
+    # ---------------------------------------------------------------
+    # ANTENNA-REG-01 / -02
+    # Antenna will not start without HKCU\Antenna\offsets_path pointing at an
+    # offsets file. The key survives deleting or renaming the executable, which
+    # makes it the most durable artifact this cheat leaves.
+    # ---------------------------------------------------------------
+    Write-Info "ANTENNA-REG: registry configuration keys..."
+    foreach ($root in $cheatRegistryRoots) {
+        $keyPath = "HKCU:\$root"
+        if (-not (Test-Path $keyPath)) { continue }
+        $props = $null
+        try { $props = Get-ItemProperty $keyPath -ErrorAction SilentlyContinue } catch {}
+        $vals = @()
+        if ($props) {
+            $props.PSObject.Properties | Where-Object { $_.Name -notlike "PS*" } |
+                ForEach-Object { $vals += "$($_.Name)=$($_.Value)" }
+        }
+        Write-Critical "[ANTENNA-REG-01] HKCU\$root exists"
+        Add-Finding -Section "Signatures" -Type "ANTENNA-REG-01" -Detail "HKCU\$root" `
+            -Value $root -Severity "Critical" -Tier "A" `
+            -Evidence "cheat configuration key. Values: $($vals -join ' | '). Persists after the executable is deleted or renamed."
+        Add-Timeline "ANTENNA-REG-01: HKCU\$root"
+        $fired++
+
+        foreach ($v in $vals) {
+            if ($v -notmatch '^(offsets_path|autoload|cfg_path|config_path)=') { continue }
+            $target = ($v -split '=',2)[1]
+            $exists = if ($target -and (Test-Path $target -ErrorAction SilentlyContinue)) { "file EXISTS" } else { "file missing" }
+            Write-Critical "[ANTENNA-REG-02]   $v  ($exists)"
+            Add-Finding -Section "Signatures" -Type "ANTENNA-REG-02" -Detail $v `
+                -Value $target -Severity "Critical" -Tier "A" `
+                -Evidence "offsets/config path required for the cheat to run; $exists"
+            $fired++
+        }
+    }
+
+    # ---------------------------------------------------------------
+    # ANTENNA-CFG-01 : offsets file identified by CONTENT, not filename.
+    # The instructions say to rename it to anything, so name matching alone
+    # loses. Roblox offset dumps contain a recognisable set of field names.
+    # ---------------------------------------------------------------
+    Write-Info "ANTENNA-CFG: offset dumps by content..."
+    # STRONG: internal engine offset names. These do not appear in Roblox
+    # scripting docs, forum posts or chat logs -- only in a memory-offset dump.
+    $offsetStrong = @("fakedatamodelpointer","fakedatamodeltodatamodel","visualenginepointer",
+                      "classdescriptor","childrenstart","childrenend","hiddencharacters",
+                      "nameocclusion","rendersteppedjob","primitive_pos","modelinstance")
+    # WEAK: ordinary Roblox vocabulary. Supporting evidence only, never a hit on
+    # its own -- these are exactly what made a saved chat log look like a dump.
+    $offsetWeak = @("collisiongroup","humanoidrootpart","localplayer","datamodel",
+                    "visualengine","classname","workspace","players")
+    foreach ($root in @("$env:USERPROFILE\Downloads","$env:USERPROFILE\Desktop",
+                        "$env:USERPROFILE\Documents","$env:TEMP","$env:APPDATA","$env:LOCALAPPDATA")) {
+        if (-not (Test-Path $root)) { continue }
+        foreach ($f in @(Get-ChildItem $root -File -Force -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+                         Where-Object { $_.Extension -match '^\.(json|jsonc|cfg|txt|ini)$' -and $_.Length -lt 512KB })) {
+            if (Is-GlobalFP $f.FullName) { continue }
+            $txt = ""
+            try { $txt = (Get-Content $f.FullName -Raw -ErrorAction Stop).ToLower() } catch { continue }
+            if (-not $txt) { continue }
+            if (Test-IsSelf $txt) { continue }
+            $strong = @($offsetStrong | Where-Object { $txt.Contains($_) })
+            $weak   = @($offsetWeak   | Where-Object { $txt.Contains($_) })
+            # Two engine-internal names, or one plus a body of supporting
+            # vocabulary. Weak names alone never fire.
+            $isDump = ($strong.Count -ge 2) -or ($strong.Count -ge 1 -and $weak.Count -ge 4)
+            if (-not $isDump) {
+                if ($weak.Count -ge 4) { Add-FP "ANTENNA-CFG-01" $f.FullName "only generic Roblox vocabulary ($($weak -join ', ')) -- no engine offset names" }
+                continue
+            }
+            Write-Critical "[ANTENNA-CFG-01] Roblox offset dump: $($f.FullName)"
+            Write-Critical "                 engine offsets: $($strong -join ', ')"
+            Add-Finding -Section "Signatures" -Type "ANTENNA-CFG-01" -Detail $f.FullName `
+                -Value "$($strong.Count) engine offset names" -Severity "Critical" -Tier "A" `
+                -Evidence "matched by CONTENT not filename. Engine-internal names: $($strong -join ', '). Supporting: $($weak -join ', '). Modified $(Format-Stamp $f.LastWriteTime). These names appear in a memory-offset dump, not in Roblox scripting material."
+            Add-Timeline "ANTENNA-CFG-01: offset dump $($f.FullName)"
+            $fired++
+        }
+    }
+
+    # ---------------------------------------------------------------
+    # ANTENNA-CFG-02 : the cheat's own settings file, matched on feature keys.
+    # Config survives deleting the exe and users almost never remove it.
+    # ---------------------------------------------------------------
+    Write-Info "ANTENNA-CFG-02: cheat settings by feature keys..."
+    $featureKeys = @("box_esp","filled_box_esp","name_esp","state_esp","soul_reap",
+                     "triggerbot","color_ready","color_cooldown","color_active",
+                     "aim_fov","aim_smoothing","font_size")
+    foreach ($root in @("$env:USERPROFILE\Downloads","$env:USERPROFILE\Desktop",
+                        "$env:USERPROFILE\Documents","$env:TEMP","$env:APPDATA","$env:LOCALAPPDATA")) {
+        if (-not (Test-Path $root)) { continue }
+        foreach ($f in @(Get-ChildItem $root -File -Force -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+                         Where-Object { $_.Extension -match '^\.(json|jsonc|cfg|ini|txt)$' -and $_.Length -lt 512KB })) {
+            if (Is-GlobalFP $f.FullName) { continue }
+            $txt = ""
+            try { $txt = (Get-Content $f.FullName -Raw -ErrorAction Stop).ToLower() } catch { continue }
+            if (-not $txt) { continue }
+            if (Test-IsSelf $txt) { continue }
+            $hits = @($featureKeys | Where-Object { $txt.Contains($_) })
+            if ($hits.Count -lt 3) { continue }
+            Write-Critical "[ANTENNA-CFG-02] cheat settings file: $($f.FullName)"
+            Write-Critical "                 keys: $($hits -join ', ')"
+            Add-Finding -Section "Signatures" -Type "ANTENNA-CFG-02" -Detail $f.FullName `
+                -Value "$($hits.Count) feature keys" -Severity "Critical" -Tier "A" `
+                -Evidence "ESP/aimbot settings matched by content: $($hits -join ', '). Modified $(Format-Stamp $f.LastWriteTime). Survives deletion of the executable."
+            Add-Timeline "ANTENNA-CFG-02: $($f.FullName)"
+            $fired++
+        }
+    }
+
+    # ---------------------------------------------------------------
+    # ANTENNA-NET-01 : offset-host references in the DNS cache.
+    # ---------------------------------------------------------------
+    Write-Info "ANTENNA-NET: offset host lookups..."
+    try {
+        foreach ($e in (Get-DnsClientCache -ErrorAction Stop)) {
+            $name = $e.Entry.ToLower()
+            if ($name -notmatch 'imtheo|offsets\.') { continue }
+            Write-Critical "[ANTENNA-NET-01] DNS cache: $name"
+            Add-Finding -Section "Signatures" -Type "ANTENNA-NET-01" -Detail $name `
+                -Severity "Critical" -Tier "A" `
+                -Evidence "offset-distribution host resolved on this machine; cheats fetch fresh offsets after each Roblox update"
+            $fired++
+        }
+    } catch { Write-Skip "DNS cache unavailable" }
+
+    # ---------------------------------------------------------------
+    # OVERLAY-WIN-01 : topmost + layered + click-through window owned by an
+    # untrusted process. That combination is how a game overlay draws over a
+    # fullscreen client without stealing input.
+    # OVERLAY-WIN-02 : recognisable ImGui/overlay window class.
+    # ---------------------------------------------------------------
+    Write-Info "OVERLAY-WIN: overlay-style windows..."
+    if (([Management.Automation.PSTypeName]'Win32Wnd').Type) {
+        $script:__ovHits = [System.Collections.Generic.List[object]]::new()
+        $cb = [Win32Wnd+EnumWindowsProc]{
+            param($hWnd, $lParam)
+            if (-not [Win32Wnd]::IsWindowVisible($hWnd)) { return $true }
+            $ex = [Win32Wnd]::GetWindowLongPtrW($hWnd, -20).ToInt64()
+            $sbC = New-Object System.Text.StringBuilder 256
+            [void][Win32Wnd]::GetClassNameW($hWnd, $sbC, 256)
+            $sbT = New-Object System.Text.StringBuilder 512
+            [void][Win32Wnd]::GetWindowTextW($hWnd, $sbT, 512)
+            $procId = 0
+            [void][Win32Wnd]::GetWindowThreadProcessId($hWnd, [ref]$procId)
+            $script:__ovHits.Add([PSCustomObject]@{
+                Ex=$ex; Class=$sbC.ToString(); Title=$sbT.ToString(); PID=[int]$procId
+            }) | Out-Null
+            return $true
+        }
+        try { [void][Win32Wnd]::EnumWindows($cb, [IntPtr]::Zero) } catch {}
+
+        $WS_EX_TOPMOST=0x8; $WS_EX_LAYERED=0x80000; $WS_EX_TRANSPARENT=0x20; $WS_EX_NOACTIVATE=0x08000000
+        foreach ($w in $script:__ovHits) {
+            $proc  = Get-Process -Id $w.PID -ErrorAction SilentlyContinue
+            $pname = if ($proc) { $proc.ProcessName } else { "(pid $($w.PID))" }
+            $ppath = ""; try { $ppath = $proc.MainModule.FileName } catch {}
+            $sig = if ($ppath) { Get-SigInfo $ppath } else { $null }
+            $trusted = ($sig -and $sig.Status -eq "Valid" -and
+                        ($sig.Subject -like "*Microsoft*" -or $sig.Subject -like "*NVIDIA*" -or
+                         $sig.Subject -like "*Discord*" -or $sig.Subject -like "*Valve*" -or
+                         $sig.Subject -like "*Advanced Micro Devices*" -or $sig.Subject -like "*Roblox*"))
+
+            $cl = $w.Class.ToLower()
+            foreach ($oc in $overlayWindowClasses) {
+                if ($cl -like "*$oc*") {
+                    $sev = if ($trusted) { "Review" } else { "Critical" }
+                    Write-Critical "[OVERLAY-WIN-02] overlay window class '$($w.Class)' owned by $pname"
+                    Add-Finding -Section "Signatures" -Type "OVERLAY-WIN-02" `
+                        -Detail "$pname : class=$($w.Class)" -Value $w.Title -Severity $sev `
+                        -Evidence "ImGui/overlay window class. Owner: $ppath ; signature: $(if($sig){"$($sig.Status) $($sig.Subject)"}else{'unknown'})"
+                    $fired++
+                    break
+                }
+            }
+
+            $isOverlay = (($w.Ex -band $WS_EX_TOPMOST) -ne 0) -and
+                         (($w.Ex -band $WS_EX_LAYERED) -ne 0) -and
+                         ((($w.Ex -band $WS_EX_TRANSPARENT) -ne 0) -or (($w.Ex -band $WS_EX_NOACTIVATE) -ne 0))
+            if (-not $isOverlay -or $trusted) { continue }
+            $sev = if ($sig -and $sig.Status -eq "Valid") { "Review" } else { "Critical" }
+            Write-Critical "[OVERLAY-WIN-01] click-through topmost overlay owned by $pname"
+            Add-Finding -Section "Signatures" -Type "OVERLAY-WIN-01" `
+                -Detail "$pname : '$($w.Title)' class=$($w.Class)" `
+                -Value ("exstyle 0x" + $w.Ex.ToString("X")) -Severity $sev `
+                -Evidence "TOPMOST + LAYERED + TRANSPARENT/NOACTIVATE -- draws over a fullscreen game without taking input. Owner: $ppath ; signature: $(if($sig){"$($sig.Status) $($sig.Subject)"}else{'unknown'})"
+            Add-Timeline "OVERLAY-WIN-01: overlay window owned by $pname"
+            $fired++
+        }
+    } else {
+        Write-Skip "window enumeration unavailable"
+    }
+
+    # ---------------------------------------------------------------
+    # EXTMEM-PROC-01 : an unsigned process holding a READ handle to Roblox
+    # while writing nothing. That is the read-only ESP pattern -- quieter than
+    # an injector and missed by checks that only look for writes.
+    # ---------------------------------------------------------------
+    Write-Info "EXTMEM-PROC: external memory readers..."
+    foreach ($h in $handleFindings) {
+        if ($h.VMWrite) { continue }
+        if (-not $h.VMRead) { continue }
+        $sig = if ($h.OwnerPath) { Get-SigInfo $h.OwnerPath } else { $null }
+        $trusted = ($sig -and $sig.Status -eq "Valid" -and
+                    ($sig.Subject -like "*Microsoft*" -or $sig.Subject -like "*Roblox*"))
+        if ($trusted) { continue }
+        Write-Critical "[EXTMEM-PROC-01] $($h.OwnerName) holds a READ-ONLY handle to Roblox"
+        Add-Finding -Section "Signatures" -Type "EXTMEM-PROC-01" `
+            -Detail "$($h.OwnerName) (PID $($h.OwnerPID))" -Value $h.Access -Severity "Critical" -Tier "A" `
+            -Evidence "read access without write -- external ESP/triggerbot pattern. Path: $($h.OwnerPath) ; signature: $(if($sig){"$($sig.Status) $($sig.Subject)"}else{'unknown'})"
+        $fired++
+    }
+
+    if ($fired -eq 0) { Write-OK "No named signature fired" }
+    else { Write-Host ""; Write-Critical "  $fired signature hit(s) -- rule IDs are listed in the report" }
+    Write-SectionResult "Signatures"
+}
+
 # =====================================================
 # KERNEL DRIVER SCAN
 # =====================================================
@@ -4014,6 +5517,19 @@ function Run-HashBlocklistScan {
     Write-SectionResult "Hash Blocklist"
 }
 
+# Marker strings unique to this tool. Any binary or script containing them IS
+# this scanner (or a copy of it) and must never be matched against the term
+# list -- the term list is inside it.
+$script:SelfMarkers = @("ROBLOX CHEAT SCANNER v", "PROPERTY OF JD")
+
+function Test-IsSelf($contentLower) {
+    if (-not $contentLower) { return $false }
+    foreach ($mk in $script:SelfMarkers) {
+        if ($contentLower.Contains($mk.ToLower())) { return $true }
+    }
+    return $false
+}
+
 # =====================================================
 # RENAMED BINARY SCAN  (RESTORED -- was in v4.4, dropped in v4.5)
 #
@@ -4051,9 +5567,15 @@ function Run-RenamedBinaryScan {
             if ($trusted) { Add-FP "RenamedPE" $exe.FullName "validly signed by $($sig.Subject)"; continue }
 
             $checked++
-            $content = Get-PEHeaderString $exe.FullName 65536
+            # Read further in: the scanner's own banner sits past 64KB in the
+            # embedded copy, and its term list is deeper still.
+            $content = Get-PEHeaderString $exe.FullName 1048576
             if (-not $content) { continue }
             $lower = $content.ToLower()
+            if (Test-IsSelf $lower) {
+                Add-FP "RenamedPE" $exe.FullName "this is the scanner itself -- it embeds the cheat term list"
+                continue
+            }
 
             $hitTerm = $null; $hitTier = $null
             foreach ($t in $cheatTerms) {
@@ -4398,189 +5920,376 @@ function Generate-Report($verdict, $scannerHash) {
     Write-Header "GENERATING HTML REPORT"
     $dur = [math]::Round(((Get-Date) - $startTime).TotalSeconds)
 
-    function HtmlEnc($s) {
-        if ($null -eq $s) { return "" }
-        return $s.ToString().Replace("&","&amp;").Replace("<","&lt;").Replace(">","&gt;").Replace('"',"&quot;")
+    function HtmlEnc($v) {
+        if ($null -eq $v) { return "" }
+        return $v.ToString().Replace("&","&amp;").Replace("<","&lt;").Replace(">","&gt;").Replace('"',"&quot;")
     }
-    function SevClass($s) {
-        switch ($s) {
-            "Critical" { return "sev-crit" }
-            "Review"   { return "sev-rev" }
-            "Context"  { return "sev-ctx" }
-            default    { return "sev-info" }
+    function PathCell($full) {
+        if (-not $full -or $full -eq "could not reach") {
+            return "<span class='nopath'>could not reach</span>"
         }
-    }
-
-    $statusRows = ""
-    foreach ($s in $script:Sections.Values) {
-        $state = Get-SectionState $s
-        $cls = switch ($state) { "Critical" {"st-crit"} "Review" {"st-rev"} "Clear" {"st-clear"} default {"st-skip"} }
-        $note = switch ($state) {
-            "Critical" { "$($s.Critical) confirmed, $($s.Review) review" }
-            "Review"   { "$($s.Review) item(s) need a human" }
-            "Clear"    { if ($s.Coverage) { $s.Coverage } else { "nothing found" } }
-            default    { "NOT CHECKED -- $($s.Reason)" }
-        }
-        $statusRows += "<tr class='$cls'><td>$(HtmlEnc $s.Name)</td><td class='stcell'>$state</td><td>$(HtmlEnc $note)</td></tr>`n"
+        $dir = try { Split-Path $full -Parent } catch { "" }
+        $open = if ($dir) { "<a class='openf' data-d='$(HtmlEnc $dir)'>open folder</a>" } else { "" }
+        return "<span class='path' data-p='$(HtmlEnc $full)'>$(HtmlEnc $full)</span>$open"
     }
 
     $scored  = @($findings | Where-Object { $_.Severity -in @("Critical","Review") })
     $context = @($findings | Where-Object { $_.Severity -in @("Context","Info") })
 
-    $findRows = ""
-    $reportOrder = $scored | Sort-Object `
-        @{E={ switch ($_.Tier) { "A" {0} "B" {1} "C" {2} default {3} } }}, `
-        @{E={ switch ($_.Severity) { "Critical" {0} "Review" {1} default {2} } }}, `
-        @{E={ [string]$_.Section }}, @{E={ [string]$_.Type }}, @{E={ [string]$_.Detail }}
-    foreach ($f in $reportOrder) {
-        $tier = if ($f.Tier) { " <span class='tier'>Tier $($f.Tier)</span>" } else { "" }
-        $findRows += "<tr class='$(SevClass $f.Severity)'><td>$($f.Severity)$tier</td><td>$(HtmlEnc $f.Section)</td><td>$(HtmlEnc $f.Type)</td><td>$(HtmlEnc $f.Detail)</td><td>$(HtmlEnc $f.Value)</td><td class='ev'>$(HtmlEnc $f.Evidence)</td></tr>`n"
+    # ---------- category groups ----------
+    $catHtml = ""
+    $seenSections = @{}
+    foreach ($cat in $script:CategoryMap.Keys) {
+        $members = @($script:CategoryMap[$cat] | Where-Object { $script:Sections.Contains($_) })
+        if ($members.Count -eq 0) { continue }
+        foreach ($mn in $members) { $seenSections[$mn] = $true }
+
+        $crit = 0; $rev = 0; $unchecked = 0
+        foreach ($mn in $members) {
+            $sec = $script:Sections[$mn]
+            if (-not $sec.Ran) { $unchecked++ ; continue }
+            $crit += $sec.Critical; $rev += $sec.Review
+        }
+        $catFindings = @($scored | Where-Object { $members -contains $_.Section } |
+            Sort-Object @{E={ switch ($_.Severity) { "Critical" {0} "Review" {1} default {2} } }},
+                        @{E={ switch ($_.Tier) { "A" {0} "B" {1} "C" {2} default {3} } }},
+                        @{E={ [string]$_.Section }}, @{E={ [string]$_.Detail }})
+
+        $cls = if ($crit -gt 0) { "crit" } elseif ($rev -gt 0) { "rev" } else { "ok" }
+        $openAttr = if ($crit -gt 0 -or $rev -gt 0) { " open" } else { "" }
+        $countTxt = if ($crit -gt 0) { "$crit confirmed" }
+                    elseif ($rev -gt 0) { "$rev review" }
+                    else { "Clear" }
+        $countTxt += " &middot; $($members.Count) section$(if($members.Count -ne 1){'s'})"
+        if ($unchecked -gt 0) { $countTxt += " &middot; $unchecked not checked" }
+        $icon = if ($script:CategoryIcon.ContainsKey($cat)) { $script:CategoryIcon[$cat] } else { "&#9679;" }
+
+        $inner = ""
+        foreach ($f in $catFindings) {
+            $tierCls = if ($f.Tier -eq "A") { "a" } elseif ($f.Tier -eq "B") { "b" } else { "c" }
+            $tierTag = if ($f.Tier) { "<span class='tier $tierCls'>TIER $($f.Tier)</span>" }
+                       else { "<span class='tier $(if($f.Severity -eq 'Critical'){'a'}else{'b'})'>$($f.Severity.ToUpper())</span>" }
+            $fp   = Get-FindingPath $f.Detail $f.Evidence
+            $info = [string]$f.Detail
+            if ($fp) { $info = ($info -replace [regex]::Escape($fp), '').Trim(' ', '-', ':', '|') }
+            if (-not $info) { $info = $f.Type }
+            $inner += @"
+      <div class='find'>
+        <div class='fhead'>$tierTag<span class='ftitle'>$(HtmlEnc $f.Type)</span><span class='rule'>$(HtmlEnc $f.Section)</span></div>
+        <div class='pathrow'><span class='info'>$(HtmlEnc $info)</span><span class='pipe'>|</span>$(PathCell $fp)</div>
+        $(if ($f.Value) { "<div class='fval'>match: $(HtmlEnc $f.Value)</div>" })
+        $(if ($f.Evidence) { "<div class='fev'>$(HtmlEnc $f.Evidence)</div>" })
+      </div>
+"@
+        }
+        foreach ($mn in $members) {
+            $sec = $script:Sections[$mn]
+            $st = Get-SectionState $sec
+            if ($st -eq "Critical" -or $st -eq "Review") { continue }
+            $badge = if ($st -eq "Clear") { "<span class='badge'>CLEAR</span>" } else { "<span class='badge g'>&mdash;</span>" }
+            $note  = if ($st -eq "Clear") { if ($sec.Coverage) { $sec.Coverage } else { "nothing found" } } else { "NOT CHECKED &mdash; $($sec.Reason)" }
+            $inner += "      <div class='sect'>$badge<span class='sname'>$(HtmlEnc $mn)</span><span class='snote'>$(HtmlEnc $note)</span></div>`n"
+        }
+
+        $catHtml += @"
+  <details class='$cls'$openAttr>
+    <summary><span class='ico'>$icon</span><span class='qtitle'>$(HtmlEnc $cat)</span><span class='count'>$countTxt</span><span class='chev'>&rsaquo;</span></summary>
+    <div class='body'>
+$inner    </div>
+  </details>
+"@
     }
+
+    # any section not claimed by a category
+    $orphans = @($script:Sections.Keys | Where-Object { -not $seenSections.ContainsKey($_) })
+    if ($orphans.Count -gt 0) {
+        $inner = ""
+        foreach ($mn in $orphans) {
+            $sec = $script:Sections[$mn]; $st = Get-SectionState $sec
+            $badge = if ($st -eq "Clear") { "<span class='badge'>CLEAR</span>" } else { "<span class='badge g'>&mdash;</span>" }
+            $inner += "      <div class='sect'>$badge<span class='sname'>$(HtmlEnc $mn)</span><span class='snote'>$(HtmlEnc $sec.Coverage)$(HtmlEnc $sec.Reason)</span></div>`n"
+        }
+        $catHtml += "  <details class='ok'><summary><span class='ico'>&#9679;</span><span class='qtitle'>Other</span><span class='count'>$($orphans.Count) sections</span><span class='chev'>&rsaquo;</span></summary><div class='body'>`n$inner</div></details>`n"
+    }
+
+    # ---------- capture-excluded window table ----------
+    $capRows = ""
+    # Every capture-excluded window is listed, always. Unresolvable fields say
+    # so in place rather than dropping the row -- a window nobody can name is
+    # more interesting than one they can, not less.
+    foreach ($w in ($captureWindows | Sort-Object @{E={ switch ($_.Severity) { "Critical" {0} "Review" {1} default {2} } }}, Process)) {
+        $rc = switch ($w.Severity) { "Critical" {"w-crit"} "Review" {"w-rev"} default {"w-ok"} }
+        $sigCls = if ($w.SigStatus -eq "Valid") { "sig-ok" } elseif ($w.SigStatus -eq "could not reach") { "sig-mid" } else { "sig-bad" }
+        $mism = if ($w.Mismatch) { "<span class='mism'>$(HtmlEnc $w.Mismatch)</span>" } else { "" }
+        $sigTxt = if ($w.Signer) { "$($w.SigStatus) &mdash; $(HtmlEnc $w.Signer)" }
+                  elseif ($w.SigStatus -eq "could not reach") { "<span class='nopath'>could not reach</span>" }
+                  else { "$(HtmlEnc $w.SigStatus) <span class='nopath'>(no signer recorded)</span>" }
+        $titleTxt = if ($w.Title) { HtmlEnc $w.Title } else { "<span class='nopath'>(no window title)</span>" }
+        $classTxt = if ($w.Class) { HtmlEnc $w.Class } else { "<span class='nopath'>(no class)</span>" }
+        $capRows += "<tr class='$rc' data-u='$(if($w.Untrusted){1}else{0})' data-m='$(if($w.Mismatch){1}else{0})'>" +
+                    "<td>$($w.Verdict)</td><td>$(HtmlEnc $w.Process)</td><td>$($w.ProcId)</td><td>$(HtmlEnc $w.Mode)</td>" +
+                    "<td>$titleTxt</td><td>$classTxt</td>" +
+                    "<td class='$sigCls'>$sigTxt$mism</td><td>$(PathCell $w.Path)</td></tr>`n"
+    }
+    if (-not $capRows) {
+        $capNote = if ($script:Sections["Capture Evasion"].Ran) {
+            "No window on this machine is excluded from screen capture. $($script:Sections['Capture Evasion'].Coverage)"
+        } else {
+            "NOT CHECKED &mdash; $($script:Sections['Capture Evasion'].Reason). This is not a clean result."
+        }
+        $capRows = "<tr class='w-ok'><td colspan='8'>$(HtmlEnc $capNote)</td></tr>"
+    }
+
+    # ---------- browser history ----------
+    $histRows = ""
+    foreach ($h in $browserHistoryEvents) {
+        $cls = if ($h.InRange) { "w-rev" } else { "w-ok" }
+        $histRows += "<tr class='$cls'><td>$(HtmlEnc $h.Browser)</td><td>$(HtmlEnc $h.Cleared)</td><td>$($h.DbSizeKB) KB</td><td>$(PathCell $h.Path)</td></tr>`n"
+    }
+    if (-not $histRows) { $histRows = "<tr class='w-ok'><td colspan='4'>No browser profile examined.</td></tr>" }
+
+    # ---------- context + suppressed ----------
     $ctxRows = ""
     foreach ($f in $context) {
-        $tier = if ($f.Tier) { " <span class='tier'>Tier $($f.Tier)</span>" } else { "" }
-        $ctxRows += "<tr class='sev-ctx'><td>$($f.Severity)$tier</td><td>$(HtmlEnc $f.Section)</td><td>$(HtmlEnc $f.Type)</td><td>$(HtmlEnc $f.Detail)</td><td>$(HtmlEnc $f.Value)</td><td class='ev'>$(HtmlEnc $f.Evidence)</td></tr>`n"
+        $fp = Get-FindingPath $f.Detail $f.Evidence
+        $ctxRows += "<tr><td>$(HtmlEnc $f.Section)</td><td>$(HtmlEnc $f.Type)</td><td>$(HtmlEnc $f.Detail)</td><td>$(PathCell $fp)</td></tr>`n"
     }
+    if (-not $ctxRows) { $ctxRows = "<tr><td colspan='4'>None.</td></tr>" }
+    $fpRows = ""
+    foreach ($f in $suppressed) { $fpRows += "<tr><td>$(HtmlEnc $f.Type)</td><td>$(HtmlEnc $f.Detail)</td><td>$(HtmlEnc $f.Reason)</td></tr>`n" }
+    if (-not $fpRows) { $fpRows = "<tr><td colspan='3'>None.</td></tr>" }
 
-    $modRows = ""; foreach ($m in $moduleFindings) { $modRows += "<tr class='$(SevClass $m.Severity)'><td>$(HtmlEnc $m.Process)</td><td>$(HtmlEnc $m.PID)</td><td>$(HtmlEnc $m.Module)</td><td>$(HtmlEnc $m.Signer)</td><td>$(HtmlEnc $m.Status)</td></tr>`n" }
-    $provRows = ""; foreach ($p in $provenanceFindings) { $provRows += "<tr class='$(SevClass $p.Severity)'><td>$(HtmlEnc $p.File)</td><td>$(HtmlEnc $p.HostUrl)</td><td>$(HtmlEnc $p.Referrer)</td><td>$(HtmlEnc $p.Match)</td></tr>`n" }
-    $memRows = ""; foreach ($m in $memoryFindings) { $memRows += "<tr class='sev-crit'><td>$(HtmlEnc $m.String)</td><td>$(HtmlEnc $m.Address)</td><td>$(HtmlEnc $m.Region)</td></tr>`n" }
-    $chatRows = ""; foreach ($m in $suspiciousMemFindings) { $chatRows += "<tr class='sev-ctx'><td>$(HtmlEnc $m.String)</td><td>$(HtmlEnc $m.Address)</td><td>$(HtmlEnc $m.Region)</td></tr>`n" }
-    $thrRows = ""; foreach ($t in $threadFindings) { $thrRows += "<tr class='sev-crit'><td>$(HtmlEnc $t.PID)</td><td>$(HtmlEnc $t.Name)</td><td>$(HtmlEnc $t.ThreadID)</td><td>$(HtmlEnc $t.StartAddr)</td><td>$(HtmlEnc $t.Protection)</td></tr>`n" }
-    $hndRows = ""; foreach ($h in $handleFindings) { $hndRows += "<tr><td>$(HtmlEnc $h.OwnerPID)</td><td>$(HtmlEnc $h.OwnerName)</td><td>$(HtmlEnc $h.Access)</td><td>$(HtmlEnc $h.VMWrite)</td><td>$(HtmlEnc $h.OwnerPath)</td></tr>`n" }
-    $krnRows = ""; foreach ($k in $kernelFindings) { $krnRows += "<tr class='$(SevClass $k.Severity)'><td>$(HtmlEnc $k.Name)</td><td>$(HtmlEnc $k.File)</td><td>$(HtmlEnc $k.Time)</td><td>$(HtmlEnc $k.Note)</td></tr>`n" }
-    $lchRows = ""; foreach ($l in $launchChainFindings) { $lchRows += "<tr class='$(SevClass $l.Severity)'><td>$(HtmlEnc $l.RobloxProcess)</td><td>$(HtmlEnc $l.ParentName)</td><td>$(HtmlEnc $l.ParentPath)</td><td>$(HtmlEnc $l.Note)</td></tr>`n" }
-    $dltRows = ""; foreach ($d in $deltaFindings) { $dltRows += "<tr class='$(SevClass $d.Severity)'><td>$(HtmlEnc $d.Category)</td><td>$(HtmlEnc $d.Change)</td><td>$(HtmlEnc $d.Entry)</td><td>$(HtmlEnc $d.Note)</td></tr>`n" }
-    $tlRows  = ""; foreach ($t in ($timeline | Sort-Object Time)) { $tlRows += "<tr><td>$(HtmlEnc $t.Time)</td><td>$(HtmlEnc $t.TimeUtc)</td><td>$(HtmlEnc $t.Event)</td></tr>`n" }
-    $fpRows  = ""; foreach ($f in $suppressed) { $fpRows += "<tr class='sev-ctx'><td>$(HtmlEnc $f.Type)</td><td>$(HtmlEnc $f.Detail)</td><td>$(HtmlEnc $f.Reason)</td></tr>`n" }
+    $tlRows = ""
+    foreach ($t in ($timeline | Sort-Object Time)) { $tlRows += "<tr><td>$(HtmlEnc $t.Time)</td><td>$(HtmlEnc $t.Event)</td></tr>`n" }
+    if (-not $tlRows) { $tlRows = "<tr><td colspan='2'>None.</td></tr>" }
 
-    $verdictClass = switch ($verdict.State) { "Critical" {"st-crit"} "Review" {"st-rev"} default {"st-clear"} }
-    $skipClass    = if ($verdict.Skipped -gt 0) { "st-skip" } else { "st-clear" }
+    $vCls = switch ($verdict.State) { "Critical" {"v-crit"} "Review" {"v-rev"} default {"v-ok"} }
+    $capCount = $captureWindows.Count
 
     $html = @"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Roblox Cheat Scanner v5.0 -- $env:COMPUTERNAME</title>
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>Roblox Cheat Scanner v5.8 &mdash; $(HtmlEnc $env:COMPUTERNAME)</title>
 <style>
-  :root{--bg:#0a0a0f;--bg3:#161b27;--accent:#00d4ff;--red:#ff3d3d;--amber:#ffd700;--green:#00ff88;--grey:#7a8190;--text:#e8e8e8;--muted:#666;--border:#1e2435}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);font-family:Consolas,'Courier New',monospace;padding:24px;line-height:1.6;font-size:13px}
-  h1{color:var(--accent);border-bottom:1px solid var(--accent);padding-bottom:8px;margin-bottom:16px;font-size:1.4em}
-  h2{color:var(--accent);margin:26px 0 8px;border-left:3px solid var(--accent);padding-left:10px;text-transform:uppercase;font-size:.95em}
-  .verdict{border:2px solid var(--border);border-radius:6px;padding:18px;margin:14px 0;background:var(--bg3)}
-  .verdict .big{font-size:1.5em;font-weight:bold;letter-spacing:1px}
-  .verdict .sub{font-size:1.05em;margin-top:6px}
-  .caveat{color:var(--muted);font-size:.85em;margin-top:10px;line-height:1.5}
-  .st-crit .stcell,.verdict.st-crit .big{color:var(--red)}
-  .st-rev  .stcell,.verdict.st-rev  .big{color:var(--amber)}
-  .st-clear .stcell,.verdict.st-clear .big{color:var(--green)}
-  .st-skip .stcell{color:var(--grey)}
-  .skipline.st-skip{color:var(--grey)} .skipline.st-clear{color:var(--green)}
-  .meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin:12px 0}
-  .card{background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:10px}
-  .card .label{color:var(--muted);font-size:.72em;text-transform:uppercase}
-  .card .value{font-size:1em;font-weight:bold;margin-top:3px;word-break:break-all}
-  table{border-collapse:collapse;width:100%;margin:6px 0 14px;font-size:.82em}
-  th{background:var(--bg3);color:var(--accent);padding:6px 9px;text-align:left;border-bottom:1px solid var(--border)}
-  td{padding:4px 9px;border-bottom:1px solid var(--border);word-break:break-word;vertical-align:top}
-  .sev-crit td:first-child{color:var(--red);font-weight:bold}
-  .sev-rev  td:first-child{color:var(--amber);font-weight:bold}
-  .sev-ctx  td{color:var(--grey)}
-  .tier{font-size:.85em;opacity:.75}
-  .ev{color:var(--muted);font-size:.92em}
-  details{margin:8px 0}
-  summary{cursor:pointer;color:var(--accent);padding:6px 0}
-  footer{margin-top:30px;color:var(--muted);font-size:.75em;border-top:1px solid var(--border);padding-top:10px;line-height:1.6}
-</style>
-</head>
-<body>
-<h1>ROBLOX CHEAT SCANNER v5.0 -- PROPERTY OF JD</h1>
+:root{--red:#ff4d5e;--amber:#ffc94d;--clear:#3ddc97;--text:#e9e7f0;--red-bg:#22101a;--amber-bg:#221c0f}
+[data-theme="purple"]{--bg:#0d0a14;--card:#171226;--card2:#1c1630;--border:#2c2242;--accent:#b388ff;--grey:#8b83a8;--muted:#6f6a85;--path:#c4a7ff;--path-bg:#1f1733}
+[data-theme="green"]{--bg:#080f0c;--card:#101c16;--card2:#14231c;--border:#1f3a2c;--accent:#5eead4;--grey:#7d9b8c;--muted:#5d7a6b;--path:#7fe6d2;--path-bg:#12261e}
+[data-theme="blue"]{--bg:#080d16;--card:#101724;--card2:#141d2e;--border:#1f2e47;--accent:#7dd3fc;--grey:#7f8ea8;--muted:#5f6d85;--path:#9ad9fb;--path-bg:#122033}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:Consolas,'Courier New',monospace;padding:26px;line-height:1.6;font-size:13px;max-width:1180px;margin:0 auto}
+.themebar{display:flex;gap:8px;align-items:center;margin-bottom:18px;padding-bottom:14px;border-bottom:.5px solid var(--border)}
+.themebar span{color:var(--muted);font-size:.8em;letter-spacing:.5px}
+.tbtn{background:var(--card);border:.5px solid var(--border);color:var(--grey);padding:6px 14px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:.85em}
+.tbtn.on{border-color:var(--accent);color:var(--accent);background:var(--card2)}
+.tabs{display:flex;gap:2px;margin-bottom:18px;border-bottom:.5px solid var(--border);flex-wrap:wrap}
+.tab{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--grey);padding:9px 16px;cursor:pointer;font-family:inherit;font-size:.9em}
+.tab.on{color:var(--accent);border-bottom-color:var(--accent)}
+.tab .n{color:var(--muted);font-size:.85em;margin-left:5px}
+.page{display:none}.page.on{display:block}
+h1{color:var(--accent);font-size:1.1em;letter-spacing:1px;margin-bottom:4px;font-weight:600}
+.sub{color:var(--muted);font-size:.85em;margin-bottom:18px}
+.verdict{border-radius:8px;padding:18px 20px;margin-bottom:8px}
+.v-crit{border:2px solid var(--red);background:var(--red-bg)}.v-crit .big{color:var(--red)}
+.v-rev{border:2px solid var(--amber);background:var(--amber-bg)}.v-rev .big{color:var(--amber)}
+.v-ok{border:2px solid var(--clear)}.v-ok .big{color:var(--clear)}
+.verdict .big{font-size:1.6em;font-weight:bold;letter-spacing:1px}
+.verdict .counts{font-size:.9em;color:var(--grey);margin-top:8px}
+.caveat{color:var(--muted);font-size:.82em;margin:10px 0 20px;line-height:1.55}
+.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-bottom:20px}
+.mcard{background:var(--card);border-radius:6px;padding:10px 12px;border:.5px solid var(--border)}
+.mcard .l{color:var(--muted);font-size:.72em;text-transform:uppercase;letter-spacing:.5px}
+.mcard .v{font-size:.95em;font-weight:600;margin-top:3px;word-break:break-all}
+details{margin-bottom:9px;border-radius:8px;overflow:hidden;border:.5px solid var(--border)}
+details.crit{border:1px solid var(--red)}details.rev{border:1px solid var(--amber)}
+summary{list-style:none;cursor:pointer;padding:12px 14px;display:flex;align-items:center;gap:11px;background:var(--card);user-select:none}
+summary::-webkit-details-marker{display:none}
+details.crit>summary{background:var(--red-bg)}details.rev>summary{background:var(--amber-bg)}
+.ico{font-size:1.1em;width:18px;text-align:center}.qtitle{flex:1;font-weight:600}.count{font-size:.85em;white-space:nowrap}
+.chev{color:var(--muted);transition:transform .15s}details[open] .chev{transform:rotate(90deg)}
+.crit .qtitle,.crit .count,.crit .ico{color:var(--red)}
+.rev .qtitle,.rev .count,.rev .ico{color:var(--amber)}
+.ok .ico{color:var(--accent)}.ok .count{color:var(--clear)}
+.body{background:var(--card2)}
+.find{padding:12px 16px;border-bottom:.5px solid var(--border)}.find:last-child{border-bottom:none}
+.fhead{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.tier{font-size:.72em;font-weight:600;padding:2px 8px;border-radius:4px}
+.tier.a{color:var(--red);background:var(--red-bg);border:.5px solid var(--red)}
+.tier.b{color:var(--amber);background:var(--amber-bg);border:.5px solid var(--amber)}
+.tier.c{color:var(--muted);border:.5px solid var(--border)}
+.ftitle{font-weight:600}.rule{font-size:.75em;color:var(--accent);margin-left:auto;opacity:.8}
+.pathrow{display:flex;align-items:center;gap:8px;margin-top:7px;flex-wrap:wrap}
+.info{color:var(--grey);font-size:.92em}.pipe{color:var(--border);font-weight:600}
+.path{background:var(--path-bg);border:.5px solid var(--border);border-radius:5px;padding:3px 9px;color:var(--path);font-size:.92em;cursor:pointer;word-break:break-all}
+.path:hover{border-color:var(--path)}.path.copied{border-color:var(--clear);color:var(--clear)}
+.nopath{color:var(--muted);font-style:italic;font-size:.9em}
+.openf{color:var(--grey);text-decoration:none;border:.5px solid var(--border);border-radius:5px;padding:3px 8px;font-size:.85em;white-space:nowrap;cursor:pointer}
+.openf:hover{border-color:var(--accent);color:var(--accent)}
+.fval{color:var(--grey);font-size:.85em;margin-top:4px}
+.fev{color:var(--muted);margin-top:4px;font-size:.85em;font-style:italic}
+.sect{padding:9px 16px;border-bottom:.5px solid var(--border);display:flex;gap:12px}
+.sect:last-child{border-bottom:none}
+.sname{width:220px;color:var(--grey);flex-shrink:0}.snote{color:var(--muted);font-size:.9em}
+.badge{color:var(--clear);font-size:.85em;width:72px;flex-shrink:0}.badge.g{color:var(--muted)}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.toolbar input[type=text]{background:var(--card);border:.5px solid var(--border);color:var(--text);padding:7px 11px;border-radius:6px;font-family:inherit;font-size:.9em;min-width:240px}
+.chk{display:flex;align-items:center;gap:6px;color:var(--grey);font-size:.88em;cursor:pointer}
+.stat{margin-left:auto;color:var(--muted);font-size:.85em}
+table{border-collapse:collapse;width:100%;font-size:.86em}
+th{background:var(--card);color:var(--accent);padding:8px 10px;text-align:left;border-bottom:.5px solid var(--border);white-space:nowrap}
+td{padding:8px 10px;border-bottom:.5px solid var(--border);vertical-align:top;word-break:break-word}
+tr.w-crit td:first-child{color:var(--red);font-weight:600}
+tr.w-rev td:first-child{color:var(--amber);font-weight:600}
+tr.w-ok td:first-child{color:var(--clear)}
+.sig-bad{color:var(--red)}.sig-ok{color:var(--clear)}.sig-mid{color:var(--amber)}
+.mism{color:var(--red);font-size:.85em;display:block;margin-top:3px}
+.note{background:var(--card);border-left:2px solid var(--accent);padding:12px 16px;margin-top:22px;color:var(--grey);font-size:.85em;line-height:1.65;border-radius:0 6px 6px 0}
+.note b{color:var(--accent)}
+footer{margin-top:30px;color:var(--muted);font-size:.75em;border-top:.5px solid var(--border);padding-top:12px;line-height:1.6}
+.toast{position:absolute;left:-9999px}
+</style></head><body data-theme="purple">
 
-<div class="verdict $verdictClass">
-  <div class="big">$(HtmlEnc $verdict.Line)</div>
-  <div class="sub skipline $skipClass">NOT CHECKED: $($verdict.Skipped) section(s)</div>
+<div class="themebar"><span>THEME</span>
+<button class="tbtn on" data-t="purple">purple</button>
+<button class="tbtn" data-t="green">green</button>
+<button class="tbtn" data-t="blue">blue</button></div>
+
+<h1>ROBLOX CHEAT SCANNER v5.8 &mdash; PROPERTY OF JD</h1>
+<div class="sub">$(HtmlEnc $env:COMPUTERNAME) &middot; $(HtmlEnc $env:USERNAME) &middot; $(HtmlEnc (Format-Stamp (Get-Date)))</div>
+
+<div class="tabs">
+  <button class="tab on" data-p="pg-sum">Summary</button>
+  <button class="tab" data-p="pg-cap">Hidden from screen capture<span class="n">$capCount</span></button>
+  <button class="tab" data-p="pg-hist">Browser history<span class="n">$($browserHistoryEvents.Count)</span></button>
+  <button class="tab" data-p="pg-ctx">Context<span class="n">$($context.Count)</span></button>
+  <button class="tab" data-p="pg-tl">Timeline<span class="n">$($timeline.Count)</span></button>
+  <button class="tab" data-p="pg-fp">Suppressed<span class="n">$($suppressed.Count)</span></button>
+</div>
+
+<div class="page on" id="pg-sum">
+  <div class="verdict $vCls">
+    <div class="big">$(HtmlEnc $verdict.Line)</div>
+    <div class="counts">$($verdict.Review) need review &middot; $($script:Sections.Count - $verdict.Skipped) sections ran &middot; $($verdict.Skipped) not checked</div>
+  </div>
   <div class="caveat">
-    "NO INDICATORS FOUND" is not the same as "clean". This scan covers a partial
-    slice of the machine; per-section coverage is listed below, and any section
-    marked NOT CHECKED produced no data at all.<br>
-    Tier B (dual-use) and Tier C (fragment) matches are recorded but never
-    escalate on their own. Presence artifacts (Shimcache, MUICache, AmCache)
-    show that a file existed or was displayed -- they do not prove it ran.
+    "No indicators found" is not the same as "clean" &mdash; coverage is partial and $($verdict.Skipped) section(s) produced no data at all.
+    Tier B (dual-use) and Tier C (fragment) matches are recorded but never escalate on their own.
+    Presence artifacts show a file existed or was displayed; only BAM, Prefetch and UserAssist prove it ran.
+  </div>
+  <div class="meta">
+    <div class="mcard"><div class="l">Machine</div><div class="v">$(HtmlEnc $env:COMPUTERNAME) &middot; $(HtmlEnc $env:USERNAME)</div></div>
+    <div class="mcard"><div class="l">Windows</div><div class="v">$(HtmlEnc $script:OsCaption)</div></div>
+    <div class="mcard"><div class="l">Installed</div><div class="v">$(HtmlEnc $script:InstallDate) $(HtmlEnc $script:InstallAge)</div></div>
+    <div class="mcard"><div class="l">Last boot</div><div class="v">$(HtmlEnc $script:BootTime)</div></div>
+    <div class="mcard"><div class="l">Scanner build</div><div class="v">$(HtmlEnc $scannerHash)</div></div>
+    <div class="mcard"><div class="l">Duration</div><div class="v">${dur}s &middot; $(if ($script:ScanDaysBack -ge 9999) { 'all time' } else { "last $($script:ScanDaysBack)d" })</div></div>
+  </div>
+$catHtml
+</div>
+
+<div class="page" id="pg-cap">
+  <div class="toolbar">
+    <input type="text" id="q" placeholder="filter by process, title, signer or path">
+    <label class="chk"><input type="checkbox" id="untrusted"> untrusted only</label>
+    <label class="chk"><input type="checkbox" id="mismatch"> name/signer mismatch only</label>
+    <span class="stat" id="stat"></span>
+  </div>
+  <div class="sub">Every window with a non-default display affinity, listed in full &mdash; trusted products included.
+  $(HtmlEnc $script:Sections["Capture Evasion"].Coverage)</div>
+  <table id="wt"><thead><tr>
+    <th>Verdict</th><th>Process</th><th>PID</th><th>Mode</th><th>Window title</th><th>Class</th><th>Signer</th><th>File location</th>
+  </tr></thead><tbody>
+$capRows
+  </tbody></table>
+  <div class="note">
+    <b>Every capture-excluded window is listed, trusted ones included.</b>
+    A reviewer who has never seen the legitimate case &mdash; password managers, DRM video
+    players, the Windows logon UI &mdash; cannot judge the illegitimate one.<br><br>
+    <b>Renaming does not defeat this.</b> An unsigned binary called RobloxPlayerBeta.exe still
+    reads NotSigned, which is why the signer column sits beside the process name and any
+    disagreement between the two is called out in red.<br><br>
+    <b>What this tab cannot see.</b> An overlay drawn straight into the game's own D3D
+    swapchain has no window of its own and never appears here. An empty list is not proof of a
+    clean machine &mdash; corroborate with loaded modules and process handles.<br><br>
+    <b>Nothing is filtered out of this table.</b> Every capture-excluded window appears,
+    including ones whose owner could not be identified. A window nobody can name is more
+    interesting than one they can.<br><br>
+    <b>"could not reach"</b> means the process could not be opened even after four attempts
+    (Get-Process, WMI, QueryFullProcessImageName, and the resolved image path). Usually a
+    protected or cross-session process, or one that exited mid-scan. Treat it as unknown,
+    never as clean. The PID, window title, class and affinity mode are still recorded and are
+    enough to identify it live with Task Manager or Process Explorer.
   </div>
 </div>
 
-<div class="meta">
-  <div class="card"><div class="label">Computer</div><div class="value">$(HtmlEnc $env:COMPUTERNAME)</div></div>
-  <div class="card"><div class="label">User</div><div class="value">$(HtmlEnc $env:USERNAME)</div></div>
-  <div class="card"><div class="label">Local time</div><div class="value">$(HtmlEnc (Format-Stamp (Get-Date))) (UTC$tzOffset)</div></div>
-  <div class="card"><div class="label">UTC time</div><div class="value">$($startTimeUtc.ToString('yyyy-MM-dd HH:mm:ss'))</div></div>
-  <div class="card"><div class="label">Duration</div><div class="value">${dur}s</div></div>
-  <div class="card"><div class="label">Time range</div><div class="value">$(if ($script:ScanDaysBack -ge 9999) { 'all time' } else { "last $($script:ScanDaysBack) day(s)" })</div></div>
-  <div class="card"><div class="label">Volume serial</div><div class="value">$(HtmlEnc $script:VolumeSerial)</div></div>
-  <div class="card"><div class="label">Scanner build</div><div class="value">$(HtmlEnc $scannerHash)</div></div>
-  <div class="card"><div class="label">Windows</div><div class="value">$(HtmlEnc $script:OsCaption)</div></div>
-  <div class="card"><div class="label">Installed</div><div class="value">$(HtmlEnc $script:InstallDate) $(HtmlEnc $script:InstallAge)</div></div>
-  <div class="card"><div class="label">Last boot</div><div class="value">$(HtmlEnc $script:BootTime) (up $(HtmlEnc $script:UptimeStr))</div></div>
-  <div class="card"><div class="label">Activation</div><div class="value">$(HtmlEnc $script:ActivationState)</div></div>
-  <div class="card"><div class="label">Shadow copies</div><div class="value">$(HtmlEnc $script:ShadowCount)</div></div>
+<div class="page" id="pg-hist">
+  <table><thead><tr><th>Browser</th><th>Browsing data last cleared</th><th>History DB</th><th>Source</th></tr></thead>
+  <tbody>
+$histRows
+  </tbody></table>
+  <div class="note">
+    Chromium browsers record this in <code>browser.last_clear_browsing_data_time</code>, which
+    survives the clear itself. Firefox stores no equivalent timestamp, so a wiped Firefox
+    profile is indistinguishable from a new one. Clearing history is ordinary maintenance
+    &mdash; it only matters when it lands close to the period under review.
+  </div>
 </div>
 
-<h2>Section status</h2>
-<table><tr><th>Section</th><th>Status</th><th>Note</th></tr>$statusRows</table>
+<div class="page" id="pg-ctx">
+  <table><thead><tr><th>Section</th><th>Type</th><th>Detail</th><th>File location</th></tr></thead>
+  <tbody>
+$ctxRows
+  </tbody></table>
+</div>
 
-<h2>Findings that need attention ($($scored.Count))</h2>
-<table><tr><th>Severity</th><th>Section</th><th>Type</th><th>Detail</th><th>Match</th><th>Evidence / caveat</th></tr>$findRows</table>
+<div class="page" id="pg-tl">
+  <table><thead><tr><th>Time</th><th>Event</th></tr></thead><tbody>
+$tlRows
+  </tbody></table>
+</div>
 
-<details><summary>Context items, not scored ($($context.Count)) -- click to expand</summary>
-<table><tr><th>Severity</th><th>Section</th><th>Type</th><th>Detail</th><th>Match</th><th>Evidence</th></tr>$ctxRows</table>
-</details>
-
-<h2>Loaded modules flagged</h2>
-<table><tr><th>Process</th><th>PID</th><th>Module</th><th>Signer</th><th>Sig status</th></tr>$modRows</table>
-
-<h2>Download provenance (Zone.Identifier)</h2>
-<table><tr><th>File</th><th>Host URL</th><th>Referrer</th><th>Match</th></tr>$provRows</table>
-
-<h2>Memory -- cheat-only strings</h2>
-<table><tr><th>String</th><th>Address</th><th>Region</th></tr>$memRows</table>
-
-<details><summary>Memory -- chat-reachable strings (context only)</summary>
-<table><tr><th>String</th><th>Address</th><th>Region</th></tr>$chatRows</table>
-</details>
-
-<h2>Threads starting in private executable memory</h2>
-<table><tr><th>PID</th><th>Process</th><th>TID</th><th>Start</th><th>Protection</th></tr>$thrRows</table>
-
-<h2>Processes holding a Roblox handle</h2>
-<table><tr><th>Owner PID</th><th>Owner</th><th>Access</th><th>VM Write</th><th>Path</th></tr>$hndRows</table>
-
-<h2>Kernel drivers</h2>
-<table><tr><th>Name</th><th>File</th><th>Time</th><th>Note</th></tr>$krnRows</table>
-
-<h2>Launch chain</h2>
-<table><tr><th>Process</th><th>Parent</th><th>Path</th><th>Note</th></tr>$lchRows</table>
-
-<h2>Snapshot delta</h2>
-<table><tr><th>Category</th><th>Change</th><th>Entry</th><th>Note</th></tr>$dltRows</table>
-
-<h2>Timeline</h2>
-<table><tr><th>Local</th><th>UTC</th><th>Event</th></tr>$tlRows</table>
-
-<details><summary>Suppressed as false positives ($($suppressed.Count))</summary>
-<table><tr><th>Type</th><th>Detail</th><th>Reason</th></tr>$fpRows</table>
-</details>
+<div class="page" id="pg-fp">
+  <table><thead><tr><th>Type</th><th>Detail</th><th>Suppressed because</th></tr></thead><tbody>
+$fpRows
+  </tbody></table>
+</div>
 
 <footer>
-Roblox Cheat Scanner v5.0 | $(HtmlEnc $env:COMPUTERNAME) | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') local / $($startTimeUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC<br>
-This report is plain HTML and is NOT tamper-evident. It can be edited by anyone
-with access to the machine. Verify the report hash out of band before relying
-on it in any decision.<br>
-Scanner build (SHA256 of the .ps1 that produced this report): $(HtmlEnc $scannerHash)
+Roblox Cheat Scanner v5.8 &middot; $(HtmlEnc $env:COMPUTERNAME) &middot; $(HtmlEnc (Format-Stamp (Get-Date))) &middot; $($startTimeUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC<br>
+This report is plain HTML and is NOT tamper-evident. Anyone with access to the machine can edit it.
+Verify the report hash out of band before relying on it.<br>
+Scanner build: $(HtmlEnc $scannerHash)
 </footer>
-</body></html>
+
+<textarea class="toast" id="fallback"></textarea>
+<script>
+document.querySelectorAll('.tbtn').forEach(function(b){b.addEventListener('click',function(){
+  document.body.setAttribute('data-theme',b.dataset.t);
+  document.querySelectorAll('.tbtn').forEach(function(x){x.classList.remove('on');});b.classList.add('on');});});
+document.querySelectorAll('.tab').forEach(function(t){t.addEventListener('click',function(){
+  document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('on');});
+  document.querySelectorAll('.page').forEach(function(x){x.classList.remove('on');});
+  t.classList.add('on');document.getElementById(t.dataset.p).classList.add('on');});});
+function copyText(t){if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t);return;}
+  var ta=document.getElementById('fallback');ta.value=t;ta.select();try{document.execCommand('copy');}catch(e){}}
+document.querySelectorAll('.path').forEach(function(el){el.title='Click to copy';
+  el.addEventListener('click',function(){copyText(el.dataset.p);var w=el.textContent;
+  el.classList.add('copied');el.textContent='copied';
+  setTimeout(function(){el.textContent=w;el.classList.remove('copied');},900);});});
+document.querySelectorAll('.openf').forEach(function(a){var d=a.dataset.d;
+  a.href='file:///'+d.replace(/\\/g,'/').replace(/ /g,'%20')+'/';
+  a.title='Opens '+d+' as a directory listing. Browsers cannot launch Explorer.';});
+var rows=Array.prototype.slice.call(document.querySelectorAll('#wt tbody tr'));
+function flt(){var q=document.getElementById('q').value.toLowerCase();
+  var u=document.getElementById('untrusted').checked,m=document.getElementById('mismatch').checked,n=0;
+  rows.forEach(function(r){var ok=r.textContent.toLowerCase().indexOf(q)>-1;
+    if(u&&r.dataset.u!=='1')ok=false;if(m&&r.dataset.m!=='1')ok=false;
+    r.style.display=ok?'':'none';if(ok)n++;});
+  document.getElementById('stat').textContent=n+' of '+rows.length;}
+['q','untrusted','mismatch'].forEach(function(id){var e=document.getElementById(id);
+  if(e)e.addEventListener(id==='q'?'input':'change',flt);});
+flt();
+</script></body></html>
 "@
+
     try {
         $html | Out-File $reportPath -Encoding UTF8 -Force
         $reportHash = Get-FileSha256 $reportPath
@@ -4923,6 +6632,7 @@ $currentSnapshot = Get-CurrentSnapshot
 Write-OK "Snapshot: BAM=$($currentSnapshot.BAM.Count) MUI=$($currentSnapshot.MUICache.Count) UA=$($currentSnapshot.UserAssist.Count) Shim=$($currentSnapshot.Shimcache.Count) PF=$($currentSnapshot.Prefetch.Count)"
 Pause-Step "  Press ENTER to begin the scan"
 
+Run-SecurityProductScan
 Run-Section1
 Run-Section2
 Run-Section3
@@ -4935,6 +6645,11 @@ Run-RobloxClientIntegrity
 Run-ModuleScan
 Run-MemoryScan
 Run-InjectionHostScan
+Run-CaptureEvasionScan
+Run-BrowserHistoryScan
+Run-CheatConfigScan
+Run-PESignatureScan
+Run-SignatureScan
 Run-KernelDriverScan
 Run-LaunchChainScan
 Run-ProvenanceScan
